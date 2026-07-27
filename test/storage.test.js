@@ -153,8 +153,8 @@ describe('objects', () => {
   it('deletes idempotently and reclaims the blob', async () => {
     await store.putObject({ bucket: 'bkt', key: 'k', body: body('x') })
     const blobId = store.getObject('bkt', 'k').blobId
-    assert.equal(await store.deleteObject('bkt', 'k'), true)
-    assert.equal(await store.deleteObject('bkt', 'k'), false)
+    assert.equal((await store.deleteObject('bkt', 'k')).deleted, true)
+    assert.equal((await store.deleteObject('bkt', 'k')).deleted, false)
     await assert.rejects(store.blobs.size(blobId))
   })
 
@@ -257,7 +257,7 @@ describe('multipart', () => {
   beforeEach(() => { store.createBucket('bkt') })
 
   async function upload(parts, key = 'big') {
-    const uploadId = store.createMultipartUpload({ bucket: 'bkt', key })
+    const { uploadId } = store.createMultipartUpload({ bucket: 'bkt', key })
     const etags = []
     for (const [index, content] of parts.entries()) {
       const { etag } = await store.uploadPart({
@@ -296,7 +296,7 @@ describe('multipart', () => {
 
   it('accepts parts uploaded out of order', async () => {
     const key = 'ooo'
-    const uploadId = store.createMultipartUpload({ bucket: 'bkt', key })
+    const { uploadId } = store.createMultipartUpload({ bucket: 'bkt', key })
     const second = await store.uploadPart({ bucket: 'bkt', key, uploadId, partNumber: 2, body: body('SECOND') })
     const first = await store.uploadPart({ bucket: 'bkt', key, uploadId, partNumber: 1, body: body('FIRSTaaaa') })
     await store.completeMultipartUpload({
@@ -309,7 +309,7 @@ describe('multipart', () => {
 
   it('lets a re-uploaded part number win and frees the old blob', async () => {
     const key = 'redo'
-    const uploadId = store.createMultipartUpload({ bucket: 'bkt', key })
+    const { uploadId } = store.createMultipartUpload({ bucket: 'bkt', key })
     const first = await store.uploadPart({ bucket: 'bkt', key, uploadId, partNumber: 1, body: body('OLDOLDOLD') })
     const second = await store.uploadPart({ bucket: 'bkt', key, uploadId, partNumber: 1, body: body('NEWNEWNEW') })
     assert.notEqual(first.etag, second.etag)

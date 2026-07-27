@@ -587,10 +587,14 @@ describe('error surface', () => {
     assert.equal(tag(response.text, 'Resource'), '/no-such-bucket-here/k')
   })
 
-  it('reports NotImplemented for unimplemented subresources', async () => {
-    const response = await client.request({ method: 'GET', bucket: BUCKET, query: { lifecycle: '' } })
-    assert.equal(response.status, 501)
-    assert.equal(tag(response.text, 'Code'), 'NotImplemented')
+  it('reports NotImplemented for out-of-scope subresources', async () => {
+    for (const subresource of ['acl', 'replication', 'website', 'object-lock']) {
+      const response = await client.request({
+        method: 'GET', bucket: BUCKET, query: { [subresource]: '' },
+      })
+      assert.equal(response.status, 501, subresource)
+      assert.equal(tag(response.text, 'Code'), 'NotImplemented')
+    }
   })
 
   it('rejects an unsupported method', async () => {

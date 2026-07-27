@@ -175,6 +175,7 @@ export function sendError(ctx, res, error) {
     'Content-Length': payload.length,
   }
   if (s3.detail?.contentRange) headers['Content-Range'] = s3.detail.contentRange
+  Object.assign(headers, s3.detail?.headers ?? {})
   res.writeHead(s3.statusCode, headers)
   // A 304 or a HEAD response must not carry a body.
   res.end(ctx?.method === 'HEAD' || s3.statusCode === 304 ? undefined : payload)

@@ -1,15 +1,22 @@
 import { randomUUID } from 'node:crypto'
 import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
+import { PassThrough, Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 import { S3Error } from '../errors.js'
+import { EncryptionManager, blockAlignedOffset } from '../features/encryption.js'
 import { CHECKSUM_ALGORITHMS, multipartEtag } from '../util/hash.js'
 import { toKeyBuffer } from '../util/bytes.js'
 import { BlobStore } from './blobs.js'
-import { MetadataStore } from './metadata.js'
+import { MetadataStore, NULL_VERSION } from './metadata.js'
 
 export const MAX_KEY_BYTES = 1024
 export const DEFAULT_MIN_PART_SIZE = 5 * 1024 * 1024
 export const MAX_PARTS = 10_000
+export const READ_HIGH_WATER_MARK = 1024 * 1024
+
+/** Bucket subresources stored in `bucket_config`. */
+export const CONFIG_NAMES = ['versioning', 'policy', 'cors', 'lifecycle', 'tagging', 'notification']
 
 const BUCKET_NAME_RE = /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/
 const IPV4_RE = /^\d{1,3}(\.\d{1,3}){3}$/
@@ -28,11 +35,23 @@ export function validateKey(key) {
   return key
 }
 
+function newVersionId() {
+  return randomUUID().replaceAll('-', '')
+}
+
 function checksumMismatch(algorithm, expected, actual) {
   return new S3Error(
     'InvalidRequest',
     `Value for x-amz-checksum-${algorithm} header is invalid: expected ${expected}, computed ${actual}`,
   )
+}
+
+/** Runs a stream chain and exposes the result as a single readable. */
+function chain(...streams) {
+  if (streams.length === 1) return streams[0]
+  const output = new PassThrough({ highWaterMark: READ_HIGH_WATER_MARK })
+  pipeline(...streams, output).catch((err) => output.destroy(err))
+  return output
 }
 
 /**
@@ -46,6 +65,7 @@ export class ObjectStore {
     this.minPartSize = minPartSize
     this.blobs = new BlobStore(dataDir)
     this.metadata = null
+    this.encryption = null
   }
 
   static async open(options) {
@@ -53,6 +73,8 @@ export class ObjectStore {
     await mkdir(options.dataDir, { recursive: true })
     await store.blobs.init()
     store.metadata = new MetadataStore(join(options.dataDir, 'metadata.sqlite'))
+    store.encryption = await EncryptionManager.load(
+      join(options.dataDir, 'master.key'), options.encryptionMasterKey ?? null)
     return store
   }
 
@@ -86,6 +108,28 @@ export class ObjectStore {
     return this.metadata.listBuckets()
   }
 
+  /* ------------------------ bucket subresources -------------------- */
+
+  getBucketConfig(bucket, name) {
+    this.requireBucket(bucket)
+    return this.metadata.getConfig(bucket, name)
+  }
+
+  putBucketConfig(bucket, name, value) {
+    this.requireBucket(bucket)
+    this.metadata.putConfig(bucket, name, value)
+  }
+
+  deleteBucketConfig(bucket, name) {
+    this.requireBucket(bucket)
+    this.metadata.deleteConfig(bucket, name)
+  }
+
+  /** 'Unset' until the bucket has been configured; then 'Enabled' or 'Suspended'. */
+  bucketVersioning(bucket) {
+    return this.metadata.getConfig(bucket, 'versioning')?.status ?? 'Unset'
+  }
+
   /* ---------------------------- objects ---------------------------- */
 
   /**
@@ -93,9 +137,9 @@ export class ObjectStore {
    * sent, and only then commits metadata.
    */
   async putObject({
-    bucket, key, body, contentType, metadata = {},
+    bucket, key, body, contentType, metadata = {}, tags = {},
     contentMd5 = null, expectedSha256 = null, checksumAlgorithm = null, expectedChecksum = null,
-    trailerProvider = null,
+    trailerProvider = null, encryptionRequest = null,
   }) {
     this.requireBucket(bucket)
     validateKey(key)
@@ -104,7 +148,15 @@ export class ObjectStore {
     if (expectedSha256) algorithms.push('sha256')
     if (checksumAlgorithm) algorithms.push(checksumAlgorithm)
 
-    const { blobId, size, hasher } = await this.blobs.write(body, { algorithms })
+    let encryption = null
+    let transforms = []
+    if (encryptionRequest) {
+      const created = this.encryption.create(encryptionRequest)
+      encryption = created.context
+      transforms = [this.encryption.createEncryptStream(created.key, encryption, 0)]
+    }
+
+    const { blobId, size, hasher } = await this.blobs.write(body, { algorithms, transforms })
 
     try {
       const md5 = hasher.digest('md5', 'hex')
@@ -130,68 +182,193 @@ export class ObjectStore {
 
       const etag = `"${md5}"`
       const lastModified = new Date()
-      const previous = this.metadata.getObject(bucket, key)
+      const versioning = this.bucketVersioning(bucket)
+      const versionId = versioning === 'Enabled' ? newVersionId() : NULL_VERSION
+      // Only an unversioned write overwrites a row; with versioning enabled the
+      // previous version keeps both its row and its blob.
+      const replaced = versionId === NULL_VERSION
+        ? this.metadata.getObject(bucket, key, NULL_VERSION)
+        : null
 
-      this.metadata.putObject({
-        bucket, key, size, etag, contentType, lastModified,
-        blobId, parts: null, metadata, checksums,
+      this.metadata.transaction(() => {
+        this.metadata.clearLatest(bucket, key)
+        this.metadata.putObject({
+          bucket, key, versionId, isLatest: true, isDeleteMarker: false,
+          size, etag, contentType, lastModified,
+          blobId, parts: null, metadata, checksums, tags, encryption,
+        })
       })
 
       // Metadata is committed; the superseded blob is now unreferenced.
-      if (previous) await this._releaseObjectBlobs(previous)
+      if (replaced) await this._releaseObjectBlobs(replaced)
 
-      return { etag, size, lastModified, checksums }
+      return { etag, size, lastModified, checksums, versionId, versioned: versioning === 'Enabled', encryption }
     } catch (err) {
       await this.blobs.remove(blobId)
       throw err
     }
   }
 
-  getObject(bucket, key) {
+  getObject(bucket, key, versionId = null) {
     this.requireBucket(bucket)
-    const record = this.metadata.getObject(bucket, key)
-    if (!record) throw new S3Error('NoSuchKey', undefined, { key: String(key) })
+    const record = this.metadata.getObject(bucket, key, versionId)
+    if (!record) {
+      throw new S3Error(versionId ? 'NoSuchVersion' : 'NoSuchKey', undefined, { key: String(key) })
+    }
+    if (record.isDeleteMarker) {
+      // A delete marker addressed directly is a 405; reached as the current
+      // version it reads as a plain 404.
+      throw new S3Error(versionId ? 'MethodNotAllowed' : 'NoSuchKey', undefined, {
+        headers: { 'x-amz-delete-marker': 'true', 'x-amz-version-id': record.versionId },
+      })
+    }
     return record
   }
 
-  /** Readable over [start, end] inclusive, spanning a manifest when needed. */
-  createObjectStream(record, start = 0, end = record.size - 1) {
-    if (record.size === 0) return this.blobs.createRangeStream([], 0, -1)
-    if (record.parts) return this.blobs.createRangeStream(record.parts, start, end)
-    return this.blobs.createReadStream(record.blobId, { start, end })
+  /** Resolves the data key for a stored object, enforcing SSE-C key presentation. */
+  resolveEncryptionKey(record, encryptionRequest) {
+    if (!record.encryption) {
+      if (encryptionRequest?.mode === 'SSE-C') {
+        throw new S3Error('InvalidRequest', 'The object was not stored with SSE-C')
+      }
+      return null
+    }
+    return this.encryption.resolveKey(record.encryption, encryptionRequest)
   }
 
-  async deleteObject(bucket, key) {
+  /** Readable over [start, end] inclusive, spanning a manifest when needed. */
+  createObjectStream(record, start = 0, end = record.size - 1, { encryptionKey = null } = {}) {
+    if (record.size === 0 || end < start) return Readable.from([])
+
+    const context = record.encryption
+    if (!context) {
+      return record.parts
+        ? this.blobs.createRangeStream(record.parts, start, end)
+        : this.blobs.createReadStream(record.blobId, { start, end })
+    }
+
+    const manager = this.encryption
+    if (!record.parts) {
+      // CTR seeking needs the ciphertext read to begin on a block boundary.
+      const aligned = blockAlignedOffset(start)
+      return chain(
+        this.blobs.createReadStream(record.blobId, { start: aligned, end }),
+        ...manager.createDecryptStreams(encryptionKey, context, start, 0),
+      )
+    }
+
+    const blobs = this.blobs
+    const parts = record.parts
+    async function* generate() {
+      let offset = 0
+      for (const part of parts) {
+        const partStart = offset
+        const partEnd = offset + part.size - 1
+        offset += part.size
+        if (partEnd < start) continue
+        if (partStart > end) break
+        const from = Math.max(start - partStart, 0)
+        const to = Math.min(end - partStart, part.size - 1)
+        if (to < from) continue
+        yield* chain(
+          blobs.createReadStream(part.blobId, { start: blockAlignedOffset(from), end: to }),
+          ...manager.createDecryptStreams(encryptionKey, context, from, part.partNumber),
+        )
+      }
+    }
+    return Readable.from(generate(), { highWaterMark: READ_HIGH_WATER_MARK })
+  }
+
+  /**
+   * Removes a version, or writes a delete marker when the bucket is versioned.
+   * Returns what happened so the handler can set the response headers.
+   */
+  async deleteObject(bucket, key, versionId = null) {
     this.requireBucket(bucket)
+    const versioning = this.bucketVersioning(bucket)
+
+    if (versionId) {
+      const record = this.metadata.getObject(bucket, key, versionId)
+      if (!record) return { deleted: false }
+      this.metadata.transaction(() => {
+        this.metadata.deleteVersion(bucket, key, versionId)
+        if (record.isLatest) this.metadata.promoteLatest(bucket, key)
+      })
+      await this._releaseObjectBlobs(record)
+      return { deleted: true, versionId, deleteMarker: record.isDeleteMarker }
+    }
+
+    if (versioning === 'Enabled' || versioning === 'Suspended') {
+      const markerVersion = versioning === 'Enabled' ? newVersionId() : NULL_VERSION
+      const replaced = markerVersion === NULL_VERSION
+        ? this.metadata.getObject(bucket, key, NULL_VERSION)
+        : null
+      this.metadata.transaction(() => {
+        this.metadata.clearLatest(bucket, key)
+        this.metadata.putObject({
+          bucket, key, versionId: markerVersion, isLatest: true, isDeleteMarker: true,
+          size: 0, etag: '', lastModified: new Date(), blobId: null,
+        })
+      })
+      if (replaced) await this._releaseObjectBlobs(replaced)
+      return { deleted: true, versionId: markerVersion, deleteMarker: true }
+    }
+
     const record = this.metadata.getObject(bucket, key)
-    if (!record) return false
+    if (!record) return { deleted: false }
     // Drop the reference first: a crash then leaves an orphan blob, never a
     // metadata row pointing at missing data.
-    this.metadata.deleteObject(bucket, key)
+    this.metadata.deleteVersion(bucket, key, record.versionId)
     await this._releaseObjectBlobs(record)
-    return true
+    return { deleted: true }
   }
 
-  async copyObject({ sourceBucket, sourceKey, bucket, key, metadata, contentType, replaceMetadata }) {
-    const source = this.getObject(sourceBucket, sourceKey)
+  async copyObject({
+    sourceBucket, sourceKey, sourceVersionId = null, bucket, key,
+    metadata, contentType, replaceMetadata, tags, replaceTags,
+    sourceEncryptionRequest = null, encryptionRequest = null,
+  }) {
+    const source = this.getObject(sourceBucket, sourceKey, sourceVersionId)
     this.requireBucket(bucket)
     validateKey(key)
 
-    const stream = this.createObjectStream(source)
-    const { blobId, size, hasher } = await this.blobs.write(stream, { algorithms: ['md5'] })
+    const sourceKeyMaterial = this.resolveEncryptionKey(source, sourceEncryptionRequest)
+    const plaintext = this.createObjectStream(source, 0, source.size - 1,
+      { encryptionKey: sourceKeyMaterial })
+
+    let encryption = null
+    let transforms = []
+    if (encryptionRequest) {
+      const created = this.encryption.create(encryptionRequest)
+      encryption = created.context
+      transforms = [this.encryption.createEncryptStream(created.key, encryption, 0)]
+    }
+
+    const { blobId, size, hasher } = await this.blobs.write(plaintext, { algorithms: ['md5'], transforms })
     try {
       const etag = `"${hasher.digest('md5', 'hex')}"`
       const lastModified = new Date()
-      const previous = this.metadata.getObject(bucket, key)
-      this.metadata.putObject({
-        bucket, key, size, etag, lastModified,
-        contentType: replaceMetadata ? contentType : source.contentType,
-        blobId, parts: null,
-        metadata: replaceMetadata ? metadata : source.metadata,
-        checksums: {},
+      const versioning = this.bucketVersioning(bucket)
+      const versionId = versioning === 'Enabled' ? newVersionId() : NULL_VERSION
+      const replaced = versionId === NULL_VERSION
+        ? this.metadata.getObject(bucket, key, NULL_VERSION)
+        : null
+
+      this.metadata.transaction(() => {
+        this.metadata.clearLatest(bucket, key)
+        this.metadata.putObject({
+          bucket, key, versionId, isLatest: true, isDeleteMarker: false,
+          size, etag, lastModified,
+          contentType: replaceMetadata ? contentType : source.contentType,
+          blobId, parts: null,
+          metadata: replaceMetadata ? metadata : source.metadata,
+          checksums: {},
+          tags: replaceTags ? tags : source.tags,
+          encryption,
+        })
       })
-      if (previous) await this._releaseObjectBlobs(previous)
-      return { etag, lastModified, size }
+      if (replaced) await this._releaseObjectBlobs(replaced)
+      return { etag, lastModified, size, versionId, versioned: versioning === 'Enabled', encryption }
     } catch (err) {
       await this.blobs.remove(blobId)
       throw err
@@ -203,6 +380,23 @@ export class ObjectStore {
     return this.metadata.listObjects(bucket, options)
   }
 
+  listVersions(bucket, options) {
+    this.requireBucket(bucket)
+    return this.metadata.listVersions(bucket, options)
+  }
+
+  /* ---------------------------- tagging ---------------------------- */
+
+  getObjectTags(bucket, key, versionId = null) {
+    return this.getObject(bucket, key, versionId).tags ?? {}
+  }
+
+  setObjectTags(bucket, key, versionId, tags) {
+    const record = this.getObject(bucket, key, versionId)
+    this.metadata.setTags(bucket, key, record.versionId, tags)
+    return record.versionId
+  }
+
   async _releaseObjectBlobs(record) {
     const ids = []
     if (record.blobId) ids.push(record.blobId)
@@ -212,12 +406,15 @@ export class ObjectStore {
 
   /* -------------------------- multipart ---------------------------- */
 
-  createMultipartUpload({ bucket, key, contentType, metadata = {} }) {
+  createMultipartUpload({ bucket, key, contentType, metadata = {}, tags = {}, encryptionRequest = null }) {
     this.requireBucket(bucket)
     validateKey(key)
     const uploadId = randomUUID().replaceAll('-', '')
-    this.metadata.createUpload({ uploadId, bucket, key, contentType, metadata })
-    return uploadId
+    // Fixing the encryption context up front is what lets every part share one
+    // key while still getting a non-overlapping counter window.
+    const encryption = encryptionRequest ? this.encryption.create(encryptionRequest).context : null
+    this.metadata.createUpload({ uploadId, bucket, key, contentType, metadata, tags, encryption })
+    return { uploadId, encryption }
   }
 
   requireUpload(uploadId, bucket, key) {
@@ -228,8 +425,11 @@ export class ObjectStore {
     return upload
   }
 
-  async uploadPart({ bucket, key, uploadId, partNumber, body, contentMd5, expectedSha256, checksumAlgorithm, expectedChecksum, trailerProvider }) {
-    this.requireUpload(uploadId, bucket, key)
+  async uploadPart({
+    bucket, key, uploadId, partNumber, body, contentMd5, expectedSha256,
+    checksumAlgorithm, expectedChecksum, trailerProvider, encryptionRequest = null,
+  }) {
+    const upload = this.requireUpload(uploadId, bucket, key)
     if (!Number.isInteger(partNumber) || partNumber < 1 || partNumber > MAX_PARTS) {
       throw new S3Error('InvalidArgument', `Part number must be an integer between 1 and ${MAX_PARTS}`)
     }
@@ -238,7 +438,13 @@ export class ObjectStore {
     if (expectedSha256) algorithms.push('sha256')
     if (checksumAlgorithm) algorithms.push(checksumAlgorithm)
 
-    const { blobId, size, hasher } = await this.blobs.write(body, { algorithms })
+    let transforms = []
+    if (upload.encryption) {
+      const dataKey = this.encryption.resolveKey(upload.encryption, encryptionRequest)
+      transforms = [this.encryption.createEncryptStream(dataKey, upload.encryption, partNumber)]
+    }
+
+    const { blobId, size, hasher } = await this.blobs.write(body, { algorithms, transforms })
     try {
       if (contentMd5 && hasher.digest('md5', 'base64') !== contentMd5) throw new S3Error('BadDigest')
       if (expectedSha256 && hasher.digest('sha256', 'hex') !== expectedSha256) {
@@ -255,7 +461,7 @@ export class ObjectStore {
       this.metadata.putPart({ uploadId, partNumber, size, etag, blobId })
       // Re-uploading a part number replaces it; the old blob is now garbage.
       if (previous) await this.blobs.remove(previous.blobId)
-      return { etag, size }
+      return { etag, size, encryption: upload.encryption }
     } catch (err) {
       await this.blobs.remove(blobId)
       throw err
@@ -302,24 +508,33 @@ export class ObjectStore {
     const size = manifest.reduce((total, part) => total + part.size, 0)
     const etag = `"${multipartEtag(manifest.map((part) => part.etag.replaceAll('"', '')))}"`
     const lastModified = new Date()
-    const previous = this.metadata.getObject(bucket, key)
+    const versioning = this.bucketVersioning(bucket)
+    const versionId = versioning === 'Enabled' ? newVersionId() : NULL_VERSION
+    const replaced = versionId === NULL_VERSION
+      ? this.metadata.getObject(bucket, key, NULL_VERSION)
+      : null
 
-    this.metadata.putObject({
-      bucket, key, size, etag, lastModified,
-      contentType: upload.contentType,
-      blobId: null, parts: manifest,
-      metadata: upload.metadata, checksums: {},
+    this.metadata.transaction(() => {
+      this.metadata.clearLatest(bucket, key)
+      this.metadata.putObject({
+        bucket, key, versionId, isLatest: true, isDeleteMarker: false,
+        size, etag, lastModified,
+        contentType: upload.contentType,
+        blobId: null, parts: manifest,
+        metadata: upload.metadata, checksums: {},
+        tags: upload.tags, encryption: upload.encryption,
+      })
+      this.metadata.deleteUpload(uploadId)
     })
-    this.metadata.deleteUpload(uploadId)
 
     // Parts not referenced by the manifest are now unreachable, as is whatever
     // object previously occupied the key.
     const kept = new Set(manifest.map((part) => part.blobId))
     const discarded = [...stored.values()].map((part) => part.blobId).filter((id) => !kept.has(id))
     await this.blobs.removeMany(discarded)
-    if (previous) await this._releaseObjectBlobs(previous)
+    if (replaced) await this._releaseObjectBlobs(replaced)
 
-    return { etag, size, lastModified }
+    return { etag, size, lastModified, versionId, versioned: versioning === 'Enabled', encryption: upload.encryption }
   }
 
   async abortMultipartUpload({ bucket, key, uploadId }) {
@@ -330,4 +545,4 @@ export class ObjectStore {
   }
 }
 
-export { CHECKSUM_ALGORITHMS }
+export { CHECKSUM_ALGORITHMS, NULL_VERSION }

@@ -50,7 +50,7 @@ export class BlobStore {
    * leaves an orphan blob (swept later); the reverse order would leave metadata
    * pointing at a missing blob, which is observable data loss.
    */
-  async write(source, { algorithms = ['md5'] } = {}) {
+  async write(source, { algorithms = ['md5'], transforms = [] } = {}) {
     const blobId = randomUUID().replaceAll('-', '')
     const tmpPath = join(this.tmpDir, blobId)
     const hasher = new HashingStream(algorithms)
@@ -60,7 +60,10 @@ export class BlobStore {
 
     try {
       // 1-2. Stream to a temp file on the same filesystem, hashing in one pass.
-      await pipeline(...chain, hasher, createWriteStream(tmpPath, { flags: 'wx', mode: 0o600 }))
+      //      Digests are taken over the plaintext, so any encryption transform
+      //      sits after the hasher — the ETag stays the MD5 clients expect.
+      await pipeline(...chain, hasher, ...transforms,
+        createWriteStream(tmpPath, { flags: 'wx', mode: 0o600 }))
 
       // 3. fsync the file itself.
       const handle = await open(tmpPath, 'r+')
