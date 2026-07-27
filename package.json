@@ -1,6 +1,6 @@
 {
-  "name": "s3node",
-  "version": "0.1.0",
+  "name": "@felipedsvit/s3node",
+  "version": "0.1.1",
   "description": "Embeddable, S3-compatible object storage server for Node.js",
   "type": "module",
   "main": "src/index.js",
@@ -39,5 +39,12 @@
     "sigv4"
   ],
   "author": "",
-  "license": "ISC"
+  "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/felipedsvit/s3node.git"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  }
 }
