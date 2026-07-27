@@ -42,9 +42,9 @@
   "license": "ISC",
   "repository": {
     "type": "git",
-    "url": "https://github.com/felipedsvit/s3node.git"
+    "url": "git+https://github.com/felipedsvit/s3node.git"
   },
   "publishConfig": {
-    "registry": "https://npm.pkg.github.com"
+    "access": "public"
   }
 }
