@@ -1,6 +1,6 @@
 {
   "name": "@felipedsvit/s3node",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Embeddable, S3-compatible object storage server for Node.js",
   "type": "module",
   "main": "src/index.js",
