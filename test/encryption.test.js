@@ -3,7 +3,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { readFile, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { after, before, beforeEach, describe, it } from 'node:test'
-import { EncryptionManager, advanceIv, partIv } from '../src/features/encryption.js'
+import { EncryptionManager, advanceIv, partIv } from '../dist/src/features/encryption.js'
 import { allTags, startServer, tag } from './helpers/harness.js'
 
 const BUCKET = 'encrypted-bucket'

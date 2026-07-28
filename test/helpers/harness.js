@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createServer } from '../../src/index.js'
+import { createServer } from '../../dist/src/index.js'
 import { TestClient } from './client.js'
 
 export const CREDENTIAL = {

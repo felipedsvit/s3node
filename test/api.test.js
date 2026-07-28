@@ -4,8 +4,8 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, before, beforeEach, describe, it } from 'node:test'
-import { createServer } from '../src/index.js'
-import { Crc32 } from '../src/util/crc.js'
+import { createServer } from '../dist/src/index.js'
+import { Crc32 } from '../dist/src/util/crc.js'
 import { TestClient } from './helpers/client.js'
 
 const CREDENTIAL = { accessKeyId: 'AKIDEXAMPLE', secretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY' }

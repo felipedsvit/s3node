@@ -5,7 +5,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
 import { after, before, beforeEach, describe, it } from 'node:test'
-import { ObjectStore } from '../src/storage/store.js'
+import { MAX_OBJECT_SIZE, ObjectStore } from '../dist/src/storage/store.js'
+import { BlobStore } from '../dist/src/storage/blobs.js'
+import { MetadataStore } from '../dist/src/storage/metadata.js'
+import { EncryptionManager } from '../dist/src/features/encryption.js'
 
 let root
 let store
@@ -370,5 +373,42 @@ describe('multipart', () => {
     const { uploadId, key } = await upload(['aaaaaaaaaa', 'bbbbbbbbbb'])
     assert.deepEqual(store.listMultipartUploads('bkt', 100).map((u) => u.uploadId), [uploadId])
     assert.deepEqual(store.listParts('bkt', key, uploadId, {}).map((p) => p.partNumber), [1, 2])
+  })
+})
+
+describe('dependency injection', () => {
+  // ObjectStore.open() is a convenience factory. The constructor takes an
+  // already-resolved StoreContext, so a caller can substitute any collaborator
+  // — here, an in-memory metadata database and a fixed encryption master key.
+  it('builds a working store from a hand-assembled context', async () => {
+    const dataDir = await mkdtemp(join(root, 'injected-'))
+    const blobs = new BlobStore(dataDir)
+    await blobs.init()
+    const injected = new ObjectStore({
+      metadata: new MetadataStore(':memory:'),
+      blobs,
+      encryption: new EncryptionManager(Buffer.alloc(32, 7)),
+      region: 'eu-west-1',
+      minPartSize: 8,
+      maxObjectSize: MAX_OBJECT_SIZE,
+      maxConcurrentUploads: 10,
+    })
+
+    try {
+      injected.createBucket('injected-bucket')
+      assert.equal(injected.listBuckets()[0].region, 'eu-west-1')
+
+      await injected.putObject({ bucket: 'injected-bucket', key: 'k', body: body('hello') })
+      const record = injected.getObject('injected-bucket', 'k')
+      assert.equal(record.size, 5)
+    } finally {
+      injected.close()
+    }
+  })
+
+  it('exposes the three services behind the facade', () => {
+    assert.equal(typeof store.buckets.requireBucket, 'function')
+    assert.equal(typeof store.objects.putObject, 'function')
+    assert.equal(typeof store.multipart.uploadPart, 'function')
   })
 })

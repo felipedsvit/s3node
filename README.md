@@ -72,23 +72,46 @@ await s3node.close()
 **Service** — ListBuckets.
 
 **Bucket** — CreateBucket, DeleteBucket, HeadBucket, GetBucketLocation,
-GetBucketVersioning, ListObjectsV2, ListObjects (V1), DeleteObjects.
+Get/ Put/ Delete BucketVersioning, ListObjectsV2, ListObjects (V1), DeleteObjects,
+Get/ Put/ Delete BucketPolicy, Get/ Put/ Delete BucketCORS,
+Get/ Put/ Delete LifecycleConfiguration, Get/ Put/ Delete BucketTagging,
+Get/ Put/ Delete BucketNotification.
 
 **Object** — PutObject, GetObject, HeadObject, DeleteObject, CopyObject, with
 `Range`, conditional headers (`If-Match`, `If-None-Match`, `If-Modified-Since`,
-`If-Unmodified-Since`), `x-amz-meta-*`, and response header overrides.
+`If-Unmodified-Since`), `x-amz-meta-*`, object tagging, SSE-C and SSE-S3
+server-side encryption, `x-amz-checksum-*` headers and trailers (CRC32, CRC32C,
+SHA1, SHA256), and response header overrides for presigned URLs.
 
 **Multipart** — CreateMultipartUpload, UploadPart, CompleteMultipartUpload,
 AbortMultipartUpload, ListParts, ListMultipartUploads.
 
-**Auth** — SigV4 in the `Authorization` header and in presigned URLs, across all
-four payload modes: literal SHA-256, `UNSIGNED-PAYLOAD`,
+**Auth** — SigV4 in the `Authorization` header and in presigned URLs (query-string
+authentication), across all four payload modes: literal SHA-256, `UNSIGNED-PAYLOAD`,
 `STREAMING-AWS4-HMAC-SHA256-PAYLOAD`, and `STREAMING-UNSIGNED-PAYLOAD-TRAILER` —
 including per-chunk signature verification and `x-amz-checksum-*` trailers.
 
-**Not implemented** — versioning, bucket policy/ACL, CORS, lifecycle, tagging,
-server-side encryption, event notifications, POST form uploads. These return
-`NotImplemented` rather than silently succeeding.
+**POST** — Browser form uploads (`POST /{bucket}`) with signed policy documents,
+including `${filename}` key substitution, `content-length-range` validation,
+and `success_action_redirect` / `success_action_status`.
+
+**Notifications** — Event notifications via webhook, fired on object creation
+(Put, Post, Copy, CompleteMultipartUpload) and removal (Delete,
+DeleteMarkerCreated). Fire-and-forget with configurable timeout.
+
+**Lifecycle** — Scheduled expiration rules (age-based and date-based), including
+non-current version expiration and incomplete multipart upload abortion. Enabled
+via `lifecycleIntervalMs` on server creation.
+
+### Not implemented
+
+The following return `NotImplemented` rather than silently succeeding — the
+client gets an explicit error instead of believing a setting was applied:
+
+**ACL** (access control lists), **Website** hosting, **Replication**,
+**Object Lock** / WORM compliance, **RequestPayment**, **Analytics**,
+**Inventory**, **Metrics**, **PublicAccessBlock**, **Intelligent-Tiering**,
+**Legal Hold**, **Retention**, **Restore**, **Select**, **Accelerate**.
 
 ## Design notes
 

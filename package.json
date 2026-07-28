@@ -1,18 +1,18 @@
 {
   "name": "@felipedsvit/s3node",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Embeddable, S3-compatible object storage server for Node.js",
   "type": "module",
-  "main": "src/index.js",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
   "exports": {
-    ".": "./src/index.js"
+    ".": "./dist/src/index.js"
   },
   "bin": {
-    "s3node": "bin/s3node.js"
+    "s3node": "dist/bin/s3node.js"
   },
   "files": [
-    "src",
-    "bin",
+    "dist",
     "docs",
     "README.md",
     "LICENSE"
@@ -21,15 +21,25 @@
     "node": ">=22.5.0"
   },
   "scripts": {
+    "build": "tsc",
+    "build:watch": "tsc --watch",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit",
+    "pretest": "npm run build",
     "test": "node --test \"test/*.test.js\"",
     "test:watch": "node --test --watch \"test/*.test.js\"",
+    "pretest:interop": "npm run build",
     "test:interop": "node test/interop/aws-sdk.mjs",
-    "start": "node bin/s3node.js"
+    "prepublishOnly": "npm run build",
+    "prestart": "npm run build",
+    "start": "node dist/bin/s3node.js"
   },
   "devDependencies": {
     "@aws-sdk/client-s3": "^3.1095.0",
     "@aws-sdk/lib-storage": "^3.1095.0",
-    "@aws-sdk/s3-request-presigner": "^3.1095.0"
+    "@aws-sdk/s3-request-presigner": "^3.1095.0",
+    "@types/node": "^26.1.1",
+    "typescript": "^7.0.2"
   },
   "keywords": [
     "s3",

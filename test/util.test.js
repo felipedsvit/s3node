@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { Crc32, Crc32c } from '../src/util/crc.js'
-import { HashingStream, multipartEtag } from '../src/util/hash.js'
-import { compareKeys, keySuccessor, prefixUpperBound } from '../src/util/bytes.js'
-import { parseRange, evaluatePreconditions, parseQueryPairs } from '../src/http.js'
-import { S3Error } from '../src/errors.js'
+import { Crc32, Crc32c } from '../dist/src/util/crc.js'
+import { HashingStream, multipartEtag } from '../dist/src/util/hash.js'
+import { compareKeys, keySuccessor, prefixUpperBound } from '../dist/src/util/bytes.js'
+import { parseRange, evaluatePreconditions, parseQueryPairs } from '../dist/src/http.js'
+import { S3Error } from '../dist/src/errors.js'
 
 describe('CRC', () => {
   // 0xCBF43926 / 0xE3069283 over "123456789" are the standard check values.

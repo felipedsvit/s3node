@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { after, before, beforeEach, describe, it } from 'node:test'
-import { evaluatePolicy, ipInCidr, parsePolicy } from '../src/features/policy.js'
+import { evaluatePolicy, ipInCidr, parsePolicy } from '../dist/src/features/policy.js'
 import { allTags, startServer, tag } from './helpers/harness.js'
 
 const BUCKET = 'policy-bucket'
@@ -47,6 +47,37 @@ describe('policy engine', () => {
     }))
     assert.equal(evaluatePolicy(policy, target()), 'Allow')
     assert.equal(evaluatePolicy(policy, target({ action: 's3:PutObject' })), 'NoDecision')
+  })
+
+  it('treats ? as a single-character wildcard, not a literal dot', () => {
+    const policy = parsePolicy(JSON.stringify({
+      Statement: [{
+        Effect: 'Allow', Principal: '*', Action: 's3:GetObject',
+        Resource: `arn:aws:s3:::${BUCKET}/public/fil?.txt`,
+      }],
+    }))
+    assert.equal(evaluatePolicy(policy, target()), 'Allow')
+    assert.equal(evaluatePolicy(policy, target({
+      resource: `arn:aws:s3:::${BUCKET}/public/filX.txt`,
+    })), 'Allow')
+    assert.equal(evaluatePolicy(policy, target({
+      resource: `arn:aws:s3:::${BUCKET}/public/file2.txt`,
+    })), 'NoDecision')
+  })
+
+  it('escapes regex metacharacters that are not wildcards', () => {
+    const policy = parsePolicy(JSON.stringify({
+      Statement: [{
+        Effect: 'Allow', Principal: '*', Action: 's3:GetObject',
+        Resource: `arn:aws:s3:::${BUCKET}/a+b(c).txt`,
+      }],
+    }))
+    assert.equal(evaluatePolicy(policy, target({
+      resource: `arn:aws:s3:::${BUCKET}/a+b(c).txt`,
+    })), 'Allow')
+    assert.equal(evaluatePolicy(policy, target({
+      resource: `arn:aws:s3:::${BUCKET}/aab(c)xtxt`,
+    })), 'NoDecision')
   })
 
   it('does not let a wildcard resource leak across buckets', () => {
@@ -155,6 +186,35 @@ describe('policy engine', () => {
         Condition: { ArnFictional: { 'aws:x': 'y' } },
       }],
     })), (err) => err.code === 'MalformedPolicy')
+  })
+
+  // Validation must not short-circuit the way evaluation does: the first
+  // operator here fails against an empty context, and the bogus one after it
+  // still has to be caught at write time rather than on some later request.
+  it('checks every operator, not just up to the first unsatisfied one', () => {
+    assert.throws(() => parsePolicy(JSON.stringify({
+      Statement: [{
+        Effect: 'Allow', Principal: '*', Action: 's3:*', Resource: '*',
+        Condition: {
+          StringEquals: { 'aws:useragent': 'curl' },
+          TotallyBogusOperator: { 'aws:x': 'y' },
+        },
+      }],
+    })), (err) => err.code === 'MalformedPolicy')
+  })
+
+  it('accepts an IfExists suffix on a supported operator', () => {
+    const policy = parsePolicy(JSON.stringify({
+      Statement: [{
+        Effect: 'Allow', Principal: '*', Action: 's3:GetObject', Resource: '*',
+        Condition: { StringEqualsIfExists: { 'aws:useragent': 'curl' } },
+      }],
+    }))
+    // Absent from the context, so the test is skipped and the statement matches.
+    assert.equal(evaluatePolicy(policy, target()), 'Allow')
+    assert.equal(evaluatePolicy(policy, target({
+      context: { principal: '*', 'aws:useragent': 'wget' },
+    })), 'NoDecision')
   })
 })
 

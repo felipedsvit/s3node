@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
 import { randomBytes } from 'node:crypto'
 import { after, before, beforeEach, describe, it } from 'node:test'
-import { ALGORITHM, calculateSignature, deriveSigningKey } from '../src/auth/sigv4.js'
-import { parseBoundary, parseFormData } from '../src/features/formdata.js'
-import { Readable } from 'node:stream'
+import { ALGORITHM, calculateSignature, deriveSigningKey } from '../dist/src/auth/sigv4.js'
+import { parseBoundary, parseFormData } from '../dist/src/features/formdata.js'
+import { PassThrough, Readable } from 'node:stream'
 import { CREDENTIAL, resetBuckets, startServer, tag } from './helpers/harness.js'
 
 const BUCKET = 'post-bucket'
@@ -140,6 +140,19 @@ describe('multipart/form-data parser', () => {
     const { file } = await parseFormData([Readable.from([form])], { boundary: BOUNDARY })
     // The delimiter is only a delimiter when preceded by CRLF.
     assert.deepEqual(await collect(file.stream), payload)
+  })
+
+  // The server hands POST bodies over as [req, chunkedDecoder] whenever the
+  // payload is aws-chunked, so the parser has to pipe the sources together
+  // rather than treat the array itself as the data.
+  it('pipes a multi-stage source chain instead of reading the array', async () => {
+    const form = buildForm({ body: 'chained content' })
+    const passthrough = new PassThrough()
+    const { fields, file } = await parseFormData([Readable.from([form]), passthrough], {
+      boundary: BOUNDARY,
+    })
+    assert.equal(fields.get('bucket'), BUCKET)
+    assert.equal((await collect(file.stream)).toString(), 'chained content')
   })
 
   it('reads the boundary out of the Content-Type', () => {

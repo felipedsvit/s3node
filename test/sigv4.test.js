@@ -12,7 +12,7 @@ import {
   parseAmzDate,
   signaturesMatch,
   uriEncode,
-} from '../src/auth/sigv4.js'
+} from '../dist/src/auth/sigv4.js'
 
 describe('uriEncode', () => {
   it('leaves RFC 3986 unreserved characters alone', () => {

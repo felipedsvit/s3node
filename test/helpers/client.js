@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { request as httpRequest } from 'node:http'
-import { encodeChunked } from '../../src/auth/chunked.js'
+import { encodeChunked } from '../../dist/src/auth/chunked.js'
 import {
   ALGORITHM,
   EMPTY_SHA256,
@@ -12,7 +12,7 @@ import {
   canonicalQueryString,
   deriveSigningKey,
   uriEncode,
-} from '../../src/auth/sigv4.js'
+} from '../../dist/src/auth/sigv4.js'
 
 const PLACEHOLDER_SIGNATURE = '0'.repeat(64)
 

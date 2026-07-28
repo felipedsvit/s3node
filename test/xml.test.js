@@ -9,7 +9,7 @@ import {
   escapeXml,
   parseXml,
   text,
-} from '../src/xml.js'
+} from '../dist/src/xml.js'
 
 describe('serialisation', () => {
   it('escapes only &, < and > in element text, as S3 does', () => {

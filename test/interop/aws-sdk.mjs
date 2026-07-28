@@ -24,7 +24,7 @@ import {
 } from '@aws-sdk/client-s3'
 import { Upload } from '@aws-sdk/lib-storage'
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
-import { createServer } from '../../src/index.js'
+import { createServer } from '../../dist/src/index.js'
 
 const CREDENTIALS = { accessKeyId: 'AKIDINTEROP', secretAccessKey: 'interop-secret-key-value' }
 const BUCKET = 'interop-bucket'

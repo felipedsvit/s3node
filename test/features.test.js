@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import { createServer as createHttpServer } from 'node:http'
 import { after, before, beforeEach, describe, it } from 'node:test'
-import { runLifecycle } from '../src/features/lifecycle.js'
-import { DAY_MS } from '../src/features/lifecycle.js'
+import { runLifecycle } from '../dist/src/features/lifecycle.js'
+import { DAY_MS } from '../dist/src/features/lifecycle.js'
 import { allTags, resetBuckets, startServer, tag } from './helpers/harness.js'
 
 const BUCKET = 'feature-bucket'

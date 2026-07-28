@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
 import { randomBytes } from 'node:crypto'
 import { describe, it } from 'node:test'
-import { ChunkedDecoder, encodeChunked } from '../src/auth/chunked.js'
-import { Crc32 } from '../src/util/crc.js'
-import { deriveSigningKey } from '../src/auth/sigv4.js'
+import { ChunkedDecoder, encodeChunked } from '../dist/src/auth/chunked.js'
+import { Crc32 } from '../dist/src/util/crc.js'
+import { deriveSigningKey } from '../dist/src/auth/sigv4.js'
 
 const SCOPE = '20260727/us-east-1/s3/aws4_request'
 const AMZ_DATE = '20260727T000000Z'
