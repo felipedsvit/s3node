@@ -3,6 +3,8 @@ name: Node.js Package
 on:
   release:
     types: [created]
+  # Lets a failed publish be retried without cutting a new release.
+  workflow_dispatch:
 
 jobs:
   build:
@@ -37,7 +39,13 @@ jobs:
       # No NODE_AUTH_TOKEN: npmjs.org authenticates this workflow as a trusted
       # publisher over OIDC. Provenance attestations are generated automatically
       # for a public package built from a public repository.
-      - run: npm publish
+      #
+      # setup-node's registry-url writes an .npmrc pinning _authToken to the
+      # placeholder XXXXX-XXXXX-XXXXX-XXXXX when no token is in the env. npm is
+      # meant to override that once the OIDC exchange succeeds; if the exchange
+      # is refused it falls back to the placeholder and the registry answers 404.
+      # Verbose logging shows which of the two happened.
+      - run: npm publish --loglevel verbose
 
   publish-gpr:
     needs: build
