@@ -6,6 +6,9 @@ on:
   # Lets a failed publish be retried without cutting a new release.
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest

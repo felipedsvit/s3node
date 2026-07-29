@@ -415,7 +415,7 @@ describe('event notifications', () => {
     await harness.server.notifications.drain()
 
     assert.equal(received.length, 1)
-    assert.equal(received[0].Records[0].s3.object.key, 'watch%2Fa.txt'.replace('%2F', '/'))
+    assert.equal(received[0].Records[0].s3.object.key, 'watch/a.txt')
   })
 
   it('does not fail the request when the webhook is unreachable', async () => {
