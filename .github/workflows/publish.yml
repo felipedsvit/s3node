@@ -8,8 +8,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      # 22 is the floor declared in engines; the suite must pass there.
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
       - run: npm ci
@@ -18,16 +19,25 @@ jobs:
   publish-npm:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Lets the job mint the OIDC token npm exchanges for publish rights.
+      # Without it the publish fails with no credential at all.
+      id-token: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      # Trusted publishing needs npm >= 11.5.1 on Node >= 22.14.0. Node 24
+      # ships npm 11.16+; Node 22 still ships npm 10 and cannot do OIDC.
+      - uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version: 24
           registry-url: https://registry.npmjs.org/
+          package-manager-cache: false
       - run: npm ci
+      # No NODE_AUTH_TOKEN: npmjs.org authenticates this workflow as a trusted
+      # publisher over OIDC. Provenance attestations are generated automatically
+      # for a public package built from a public repository.
       - run: npm publish
-        env:
-          NODE_AUTH_TOKEN: ${{secrets.NPM_TOKEN}}
 
   publish-gpr:
     needs: build
@@ -36,12 +46,13 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           registry-url: https://npm.pkg.github.com/
       - run: npm ci
+      # GitHub Packages takes the workflow's own token; no 2FA is involved.
       - run: npm publish
         env:
           NODE_AUTH_TOKEN: ${{secrets.GITHUB_TOKEN}}
