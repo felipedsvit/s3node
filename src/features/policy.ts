@@ -118,10 +118,10 @@ function evaluateConditions(condition: ConditionBlock | undefined | null, contex
 function principalMatches(principal: string | { AWS?: string | string[] } | undefined, context: Record<string, string | undefined | null>): boolean {
   if (principal === undefined) return true
   if (principal === '*') return true
-  if (typeof principal === 'string') return matchesWildcard(principal, context.principal)
+  if (typeof principal === 'string') return matchesWildcard(principal, context['principal'])
   const aws = toArray(principal.AWS)
   if (aws.length === 0) return false
-  return aws.some((entry) => entry === '*' || matchesWildcard(entry, context.principal))
+  return aws.some((entry) => entry === '*' || matchesWildcard(entry, context['principal']))
 }
 
 export interface PolicyStatement {

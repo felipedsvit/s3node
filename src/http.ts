@@ -66,6 +66,23 @@ function resolveTarget(rawPath: string, headers: IncomingMessage['headers'], vir
     : { bucket: trimmed.slice(0, slash), key: trimmed.slice(slash + 1), style: 'path' }
 }
 
+/** Shape of `RequestContext.auth`, set once per request by `_authenticate`/`_handlePreflight`. */
+export interface AuthInfo {
+  anonymous: boolean
+  /** Set when authentication is deferred to the handler (POST policy uploads). */
+  deferred?: boolean
+  accessKeyId?: string
+  region?: string
+  scope?: string
+  amzDate?: string
+  payloadHash?: string | null
+  presigned?: boolean
+  seedSignature?: string | null
+  signingKey?: Buffer | null
+  canonicalRequest?: string
+  stringToSign?: string
+}
+
 export interface RequestContext {
   req: IncomingMessage
   method: string | undefined
@@ -81,7 +98,7 @@ export interface RequestContext {
   hostId: string
   bodyStreams: (IncomingMessage | import('node:stream').Transform)[]
   trailers: Record<string, string> | null
-  auth?: Record<string, unknown>
+  auth?: AuthInfo | undefined
 }
 
 export function createContext(req: IncomingMessage, { virtualHostDomain = null }: { virtualHostDomain?: string | null } = {}): RequestContext {

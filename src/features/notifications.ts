@@ -104,10 +104,10 @@ export function buildEvent({ eventName, region, bucket, key, size, etag, version
   region: string
   bucket: string
   key: string
-  size?: number
-  etag?: string
-  versionId?: string
-  configurationId?: string
+  size?: number | undefined
+  etag?: string | undefined
+  versionId?: string | undefined
+  configurationId?: string | undefined
 }): Record<string, unknown> {
   return {
     Records: [{
@@ -162,7 +162,7 @@ export interface NotificationDispatcherOptions {
   baseBackoffMs?: number
   maxBackoffMs?: number
   /** How often the background worker sweeps the queue for due deliveries. 0 disables the worker (drain() still works). */
-  intervalMs?: number
+  intervalMs?: number | undefined
 }
 
 const DEFAULT_MAX_ATTEMPTS = 6
@@ -214,9 +214,9 @@ export class NotificationDispatcher {
     bucket: string
     eventName: string
     key: string
-    size?: number
-    etag?: string
-    versionId?: string
+    size?: number | undefined
+    etag?: string | undefined
+    versionId?: string | undefined
   }): void {
     let config: NotificationConfig | null
     try {

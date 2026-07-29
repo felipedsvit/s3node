@@ -58,15 +58,15 @@ export type * from './types.js'
 
 export interface ObjectStoreOptions {
   dataDir: string
-  region?: string
-  minPartSize?: number
-  maxObjectSize?: number
-  maxConcurrentUploads?: number
-  maxConcurrentWrites?: number
+  region?: string | undefined
+  minPartSize?: number | undefined
+  maxObjectSize?: number | undefined
+  maxConcurrentUploads?: number | undefined
+  maxConcurrentWrites?: number | undefined
 }
 
 export interface OpenOptions extends ObjectStoreOptions {
-  encryptionMasterKey?: string | Buffer | null
+  encryptionMasterKey?: string | Buffer | null | undefined
 }
 
 /**

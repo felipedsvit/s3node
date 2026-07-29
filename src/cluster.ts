@@ -52,7 +52,7 @@ export async function runCluster(options: ClusterOptions): Promise<void> {
     return supervise(options)
   }
 
-  const workerId = Number(process.env.S3NODE_WORKER_ID ?? cluster.worker?.id ?? 1)
+  const workerId = Number(process.env['S3NODE_WORKER_ID'] ?? cluster.worker?.id ?? 1)
   await options.start({
     workerId,
     // Exactly one worker sweeps lifecycle rules; otherwise every worker would

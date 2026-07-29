@@ -14,11 +14,11 @@ interface LifecycleRule {
   id: string
   status: string
   filter: LifecycleFilter
-  expirationDays?: number
-  expirationDate?: string
+  expirationDays?: number | undefined
+  expirationDate?: string | undefined
   expiredObjectDeleteMarker: boolean
-  noncurrentDays?: number
-  abortAfterDays?: number
+  noncurrentDays?: number | undefined
+  abortAfterDays?: number | undefined
 }
 
 export interface LifecycleConfig {

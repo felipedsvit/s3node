@@ -140,7 +140,7 @@ interface Route {
   handler: HandlerFn
   action: string
   resource?: string
-  selfAuthenticating?: boolean
+  selfAuthenticating?: boolean | undefined
 }
 
 export function resolveRoute(ctx: RequestContext): Route & { resource: string } {

@@ -97,7 +97,7 @@ export async function copyObject(ctx: RequestContext, res: ServerResponse, { sto
 
 /** The fields of an object record that shape its response headers. */
 interface DescribableObject {
-  contentType?: string
+  contentType?: string | undefined
   etag: string
   lastModified: Date
   checksums?: Record<string, string>

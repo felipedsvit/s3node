@@ -7,7 +7,7 @@ export interface PutObjectInput {
   bucket: string
   key: string
   body: NodeJS.ReadableStream | NodeJS.ReadableStream[]
-  contentType?: string
+  contentType?: string | undefined
   metadata?: Record<string, string>
   tags?: Record<string, string>
   contentMd5?: string | null
@@ -43,7 +43,7 @@ export interface CopyObjectInput {
   bucket: string
   key: string
   metadata?: Record<string, string>
-  contentType?: string
+  contentType?: string | undefined
   replaceMetadata: boolean
   tags?: Record<string, string>
   replaceTags: boolean
@@ -63,7 +63,7 @@ export interface CopyObjectResult {
 export interface CreateMultipartInput {
   bucket: string
   key: string
-  contentType?: string
+  contentType?: string | undefined
   metadata?: Record<string, string>
   tags?: Record<string, string>
   encryptionRequest?: SseRequest | null

@@ -56,8 +56,8 @@ if (values.help) {
   process.exit(0)
 }
 
-const accessKeyId = values['access-key'] ?? process.env.S3NODE_ACCESS_KEY_ID
-const secretAccessKey = values['secret-key'] ?? process.env.S3NODE_SECRET_ACCESS_KEY
+const accessKeyId = values['access-key'] ?? process.env['S3NODE_ACCESS_KEY_ID']
+const secretAccessKey = values['secret-key'] ?? process.env['S3NODE_SECRET_ACCESS_KEY']
 
 let credential: Credential
 let generated = false

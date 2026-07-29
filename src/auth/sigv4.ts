@@ -194,13 +194,13 @@ function parseAuthorizationHeader(header: string): ParsedAuthorization {
     if (idx === -1) continue
     fields[part.slice(0, idx).trim()] = part.slice(idx + 1).trim()
   }
-  if (!fields.Credential || !fields.SignedHeaders || !fields.Signature) {
+  if (!fields['Credential'] || !fields['SignedHeaders'] || !fields['Signature']) {
     throw new S3Error('AuthorizationHeaderMalformed', 'Authorization header is missing required fields')
   }
   return {
-    ...parseCredentialScope(fields.Credential),
-    signedHeaders: fields.SignedHeaders.split(';').map((h) => h.toLowerCase()).filter(Boolean),
-    signature: fields.Signature,
+    ...parseCredentialScope(fields['Credential']),
+    signedHeaders: fields['SignedHeaders'].split(';').map((h) => h.toLowerCase()).filter(Boolean),
+    signature: fields['Signature'],
   }
 }
 

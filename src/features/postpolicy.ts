@@ -21,14 +21,14 @@ function conditionValue(fields: Map<string, string>, name: string): string | und
   return fields.get(String(name).toLowerCase())
 }
 
-function validateConditions(policy: Record<string, unknown>, fields: Map<string, string>, { contentLength }: { contentLength?: number }): { range: { min: number; max: number } | null } {
-  if (!Array.isArray(policy.conditions)) {
+function validateConditions(policy: Record<string, unknown>, fields: Map<string, string>, { contentLength }: { contentLength?: number | undefined }): { range: { min: number; max: number } | null } {
+  if (!Array.isArray(policy['conditions'])) {
     throw new S3Error('MalformedPOSTRequest', 'The policy requires a conditions array')
   }
   const covered = new Set(EXEMPT_FIELDS)
   let range: { min: number; max: number } | null = null
 
-  for (const condition of policy.conditions) {
+  for (const condition of policy['conditions']) {
     if (Array.isArray(condition)) {
       const [operator, target, ...rest] = condition
       const op = String(operator).toLowerCase()
@@ -116,10 +116,10 @@ export function verifyPostPolicy({ fields, bucket, lookupCredential, now = Date.
     throw new S3Error('MalformedPOSTRequest', 'The policy is not valid base64-encoded JSON')
   }
 
-  if (!policy.expiration || Number.isNaN(Date.parse(policy.expiration as string))) {
+  if (!policy['expiration'] || Number.isNaN(Date.parse(policy['expiration'] as string))) {
     throw new S3Error('MalformedPOSTRequest', 'The policy requires an expiration')
   }
-  if (now > Date.parse(policy.expiration as string)) throw new S3Error('AccessDenied', 'The policy has expired')
+  if (now > Date.parse(policy['expiration'] as string)) throw new S3Error('AccessDenied', 'The policy has expired')
 
   const expected = calculateSignature(
     deriveSigningKey(credential.secretAccessKey, date, region, service, accessKeyId),

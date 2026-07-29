@@ -34,7 +34,7 @@ export function integrityOptions(ctx: RequestContext): {
   trailerProvider: ((name: string) => string | null) | null
 } {
   const headers = ctx.headers
-  const payloadHash = ctx.auth?.payloadHash as string | undefined
+  const payloadHash = ctx.auth?.payloadHash
   const literalSha256 = /^[0-9a-f]{64}$/.test(payloadHash ?? '') ? payloadHash ?? null : null
 
   let checksumAlgorithm: string | null = null
@@ -113,9 +113,9 @@ export function notify(server: { notifications: NotificationDispatcher } | undef
   bucket: string
   eventName: string
   key: string
-  size?: number
-  etag?: string
-  versionId?: string
+  size?: number | undefined
+  etag?: string | undefined
+  versionId?: string | undefined
 }): void {
   server?.notifications?.dispatch(event)
 }

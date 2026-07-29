@@ -4,12 +4,12 @@ import { childText, childrenNamed, document, parseXml, text } from '../xml.js'
 const MAX_RULES = 100
 
 export interface CorsRule {
-  id?: string
+  id?: string | undefined
   allowedOrigins: string[]
   allowedMethods: string[]
   allowedHeaders: string[]
   exposeHeaders: string[]
-  maxAgeSeconds?: number
+  maxAgeSeconds?: number | undefined
 }
 
 export interface CorsConfig {

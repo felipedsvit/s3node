@@ -9,7 +9,6 @@ import {
   STREAMING_SIGNED_TRAILER,
   verifyRequest,
 } from './auth/sigv4.js'
-import type { VerifyResult } from './auth/sigv4.js'
 import { S3Error } from './errors.js'
 import {
   matchRule,
@@ -24,7 +23,7 @@ import { NotificationDispatcher } from './features/notifications.js'
 import { evaluatePolicy, objectArn } from './features/policy.js'
 import type { PolicyDocument } from './features/policy.js'
 import { createContext, sendEmpty, sendError } from './http.js'
-import type { RequestContext } from './http.js'
+import type { AuthInfo, RequestContext } from './http.js'
 import { MetricsRegistry } from './metrics.js'
 import { resolveRoute } from './router.js'
 import { ObjectStore } from './storage/store.js'
@@ -51,16 +50,16 @@ interface ServerEvent {
 export interface ServerOptions {
   store: ObjectStore
   credentials: CredentialStore | Credential[]
-  region?: string
-  virtualHostDomain?: string | null
-  logger?: { error: (entry: Record<string, unknown>) => void } | null
-  lifecycleIntervalMs?: number
+  region?: string | undefined
+  virtualHostDomain?: string | null | undefined
+  logger?: { error: (entry: Record<string, unknown>) => void } | null | undefined
+  lifecycleIntervalMs?: number | undefined
   /** How often the notification worker sweeps the queue for due deliveries. 0 disables the background worker. */
-  notificationIntervalMs?: number
+  notificationIntervalMs?: number | undefined
   /** Sustained requests/sec allowed per caller (access key, or source IP when anonymous). Unset disables rate limiting. */
-  rateLimitPerSecond?: number
+  rateLimitPerSecond?: number | undefined
   /** Burst capacity for the rate limiter; defaults to `rateLimitPerSecond` when that option is set. */
-  rateLimitBurst?: number
+  rateLimitBurst?: number | undefined
 }
 
 export interface CreateOptions {
@@ -228,18 +227,18 @@ export class S3NodeServer {
 
   /** Rate-limits by access key when signed, falling back to source IP for anonymous requests. */
   _rateLimitKey(ctx: RequestContext): string {
-    if (!ctx.auth?.anonymous && (ctx.auth as Record<string, string>)?.accessKeyId) {
-      return `key:${(ctx.auth as Record<string, string>).accessKeyId}`
+    if (!ctx.auth?.anonymous && ctx.auth?.accessKeyId) {
+      return `key:${ctx.auth.accessKeyId}`
     }
     return `ip:${(ctx.req.socket as import('node:net').Socket)?.remoteAddress ?? 'unknown'}`
   }
 
-  _authenticate(ctx: RequestContext): Record<string, unknown> {
+  _authenticate(ctx: RequestContext): AuthInfo {
     const signed = ctx.headers.authorization || ctx.query.get('X-Amz-Signature') !== undefined
     if (!signed) {
       return {
         anonymous: true,
-        payloadHash: ctx.headers['x-amz-content-sha256'] ?? 'UNSIGNED-PAYLOAD',
+        payloadHash: (ctx.headers['x-amz-content-sha256'] as string | undefined) ?? 'UNSIGNED-PAYLOAD',
       }
     }
     return {
@@ -264,7 +263,7 @@ export class S3NodeServer {
     // policies that never reference these keys don't pay for an extra aggregate query.
     const usage = ctx.bucket ? this.store.metadata.bucketUsage(ctx.bucket) : null
     return {
-      principal: ctx.auth?.anonymous ? '*' : `arn:aws:iam::s3node:user/${(ctx.auth as Record<string, string>).accessKeyId}`,
+      principal: ctx.auth?.anonymous ? '*' : `arn:aws:iam::s3node:user/${ctx.auth?.accessKeyId}`,
       'aws:sourceip': (socket as import('node:net').Socket)?.remoteAddress ?? '',
       'aws:securetransport': String(Boolean((socket as import('node:net').Socket & { encrypted?: boolean })?.encrypted)),
       'aws:useragent': ctx.headers['user-agent'] as string | undefined,
@@ -325,7 +324,7 @@ export class S3NodeServer {
   }
 
   _attachBody(ctx: RequestContext): void {
-    const payloadHash = (ctx.auth as Record<string, string>)?.payloadHash
+    const payloadHash = ctx.auth?.payloadHash
     if (!payloadHash || !STREAMING_PAYLOADS.has(payloadHash)) return
 
     const declaredLength = ctx.headers['x-amz-decoded-content-length'] as string | undefined
@@ -334,14 +333,13 @@ export class S3NodeServer {
       throw new S3Error('InvalidArgument', 'Invalid x-amz-decoded-content-length')
     }
 
-    const auth = ctx.auth as Record<string, unknown>
     const decoder = new ChunkedDecoder({
       signed: !ctx.auth?.anonymous &&
         (payloadHash === STREAMING_SIGNED || payloadHash === STREAMING_SIGNED_TRAILER),
-      seedSignature: auth.seedSignature as string | null,
-      signingKey: auth.signingKey as Buffer | null,
-      scope: auth.scope as string | null,
-      amzDate: auth.amzDate as string | null,
+      seedSignature: ctx.auth?.seedSignature ?? null,
+      signingKey: ctx.auth?.signingKey ?? null,
+      scope: ctx.auth?.scope ?? null,
+      amzDate: ctx.auth?.amzDate ?? null,
       expectedLength,
     })
 

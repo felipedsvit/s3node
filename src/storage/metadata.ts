@@ -1,311 +1,22 @@
 import { DatabaseSync } from 'node:sqlite'
-import type { EncryptionContext } from '../features/encryption.js'
-import { keySuccessor, prefixUpperBound, toKeyBuffer } from '../util/bytes.js'
-import type { BlobPart } from './blobs.js'
-import { LRUCache } from './cache.js'
+import { BucketMetadata } from './metadata/buckets.js'
+import { MultipartMetadata } from './metadata/multipart.js'
+import { NotificationMetadata } from './metadata/notifications.js'
+import { ObjectMetadata } from './metadata/objects.js'
+import { migrateV1ToV2, migrateV2ToV3, NULL_VERSION, SCHEMA, SCHEMA_VERSION } from './metadata/schema.js'
+import type { BucketRecord, ListObjectsResult, ListVersionsResult, NotificationQueueRow, ObjectInput, ObjectRecord, PartRecord, UploadRecord } from './metadata/types.js'
 
-// v4 only adds a new table (CREATE TABLE IF NOT EXISTS), so it needs no
-// migrate function: unlike the v1->v2/v2->v3 ALTERs, there is no existing
-// data to reshape for a table that didn't exist before.
-export const SCHEMA_VERSION = 4
-export const NULL_VERSION = 'null'
-
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS buckets (
-  name          TEXT PRIMARY KEY,
-  created_at    INTEGER NOT NULL,
-  region        TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS bucket_config (
-  bucket        TEXT NOT NULL,
-  name          TEXT NOT NULL,
-  value         TEXT NOT NULL,
-  PRIMARY KEY (bucket, name)
-) WITHOUT ROWID;
-
-CREATE TABLE IF NOT EXISTS objects (
-  bucket           TEXT NOT NULL,
-  key              BLOB NOT NULL,
-  version_id       TEXT NOT NULL,
-  sequence         INTEGER NOT NULL,
-  is_latest        INTEGER NOT NULL DEFAULT 1,
-  is_delete_marker INTEGER NOT NULL DEFAULT 0,
-  size             INTEGER NOT NULL,
-  etag             TEXT NOT NULL,
-  content_type     TEXT,
-  last_modified    INTEGER NOT NULL,
-  blob_id          TEXT,
-  parts            TEXT,
-  metadata         TEXT,
-  checksums        TEXT,
-  tags             TEXT,
-  encryption       TEXT,
-  retention_mode   TEXT,
-  retain_until     INTEGER,
-  legal_hold       INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY (bucket, key, version_id)
-) WITHOUT ROWID;
-
-CREATE INDEX IF NOT EXISTS objects_latest ON objects (bucket, key) WHERE is_latest = 1;
-CREATE INDEX IF NOT EXISTS objects_sequence ON objects (bucket, key, sequence DESC);
-
-CREATE TABLE IF NOT EXISTS uploads (
-  upload_id     TEXT PRIMARY KEY,
-  bucket        TEXT NOT NULL,
-  key           BLOB NOT NULL,
-  initiated_at  INTEGER NOT NULL,
-  content_type  TEXT,
-  metadata      TEXT,
-  tags          TEXT,
-  encryption    TEXT
-);
-
-CREATE INDEX IF NOT EXISTS uploads_by_bucket_key ON uploads (bucket, key);
-
-CREATE TABLE IF NOT EXISTS upload_parts (
-  upload_id     TEXT NOT NULL,
-  part_number   INTEGER NOT NULL,
-  size          INTEGER NOT NULL,
-  etag          TEXT NOT NULL,
-  blob_id       TEXT NOT NULL,
-  uploaded_at   INTEGER NOT NULL,
-  PRIMARY KEY (upload_id, part_number)
-) WITHOUT ROWID;
-
-CREATE TABLE IF NOT EXISTS notification_queue (
-  id              INTEGER PRIMARY KEY AUTOINCREMENT,
-  bucket          TEXT NOT NULL,
-  target_id       TEXT NOT NULL,
-  endpoint        TEXT NOT NULL,
-  payload         TEXT NOT NULL,
-  attempts        INTEGER NOT NULL DEFAULT 0,
-  next_attempt_at INTEGER NOT NULL,
-  status          TEXT NOT NULL DEFAULT 'pending',
-  created_at      INTEGER NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS notification_queue_due ON notification_queue (status, next_attempt_at);
-`
-
-const LIST_BATCH = 512
-
-export interface ObjectRecord {
-  bucket: string
-  key: Buffer
-  versionId: string
-  sequence: number
-  isLatest: boolean
-  isDeleteMarker: boolean
-  size: number
-  etag: string
-  contentType: string | undefined
-  lastModified: Date
-  blobId: string | null
-  parts: BlobPart[] | null
-  metadata: Record<string, string>
-  checksums: Record<string, string>
-  tags: Record<string, string>
-  encryption: EncryptionContext | null
-  /** Object Lock: retention mode, its expiry, and the independent legal hold. */
-  retentionMode: string | null
-  retainUntil: Date | null
-  legalHold: boolean
-}
-
-export interface BucketRecord {
-  name: string
-  createdAt: Date
-  region: string
-}
-
-export interface UploadRecord {
-  uploadId: string
-  bucket: string
-  key: Buffer
-  initiatedAt: Date
-  contentType: string | undefined
-  metadata: Record<string, string>
-  tags: Record<string, string>
-  encryption: EncryptionContext | null
-}
-
-export interface PartRecord {
-  partNumber: number
-  size: number
-  etag: string
-  blobId: string
-  uploadedAt?: Date
-}
-
-interface RawRow {
-  bucket: string
-  key: Buffer
-  version_id: string
-  sequence: number
-  is_latest: number
-  is_delete_marker: number
-  size: number
-  etag: string
-  content_type: string | null
-  last_modified: number
-  blob_id: string | null
-  parts: string | null
-  metadata: string | null
-  checksums: string | null
-  tags: string | null
-  encryption: string | null
-  retention_mode: string | null
-  retain_until: number | null
-  legal_hold: number
-}
-
-function decodeRow(row: RawRow | undefined): ObjectRecord | null {
-  if (!row) return null
-  return {
-    bucket: row.bucket,
-    key: Buffer.from(row.key),
-    versionId: row.version_id,
-    sequence: row.sequence,
-    isLatest: row.is_latest === 1,
-    isDeleteMarker: row.is_delete_marker === 1,
-    size: row.size,
-    etag: row.etag,
-    contentType: row.content_type ?? undefined,
-    lastModified: new Date(row.last_modified),
-    blobId: row.blob_id ?? null,
-    parts: row.parts ? JSON.parse(row.parts) : null,
-    metadata: row.metadata ? JSON.parse(row.metadata) : {},
-    checksums: row.checksums ? JSON.parse(row.checksums) : {},
-    tags: row.tags ? JSON.parse(row.tags) : {},
-    encryption: row.encryption ? JSON.parse(row.encryption) : null,
-    retentionMode: (row.retention_mode as string | null) ?? null,
-    retainUntil: row.retain_until == null ? null : new Date(Number(row.retain_until)),
-    legalHold: Boolean(row.legal_hold),
-  }
-}
-
-/** Object Lock columns arrived in v3; they are nullable, so ALTER is enough. */
-function migrateV2ToV3(db: DatabaseSync): void {
-  const columns = db.prepare('PRAGMA table_info(objects)').all().map((c: Record<string, unknown>) => c.name)
-  if (columns.length === 0 || columns.includes('retention_mode')) return
-  db.exec('ALTER TABLE objects ADD COLUMN retention_mode TEXT')
-  db.exec('ALTER TABLE objects ADD COLUMN retain_until INTEGER')
-  db.exec('ALTER TABLE objects ADD COLUMN legal_hold INTEGER NOT NULL DEFAULT 0')
-}
-
-function migrateV1ToV2(db: DatabaseSync): void {
-  const columns = db.prepare('PRAGMA table_info(objects)').all().map((c: Record<string, unknown>) => c.name)
-  if (columns.length === 0 || columns.includes('version_id')) return
-  db.exec('ALTER TABLE objects RENAME TO objects_v1')
-  db.exec(SCHEMA)
-  db.exec(`
-    INSERT INTO objects (bucket, key, version_id, sequence, is_latest, is_delete_marker,
-                         size, etag, content_type, last_modified, blob_id, parts, metadata, checksums)
-    SELECT bucket, key, 'null', last_modified, 1, 0,
-           size, etag, content_type, last_modified, blob_id, parts, metadata, checksums
-      FROM objects_v1`)
-  db.exec('DROP TABLE objects_v1')
-}
-
-export interface ObjectInput {
-  bucket: string
-  key: string
-  versionId?: string
-  sequence?: number
-  isLatest?: boolean
-  isDeleteMarker?: boolean
-  size: number
-  etag: string
-  contentType?: string
-  lastModified: Date | number
-  blobId?: string | null
-  parts?: BlobPart[] | null
-  metadata?: Record<string, string>
-  checksums?: Record<string, string>
-  tags?: Record<string, string>
-  encryption?: EncryptionContext | null
-  retentionMode?: string | null
-  retainUntil?: Date | null
-  legalHold?: boolean
-}
-
-interface ConfigRow {
-  value: string
-}
-
-interface BucketRow {
-  name: string
-  created_at: number
-  region: string
-}
-
-interface CountRow {
-  total: number
-}
-
-interface UsageRow {
-  objects: number
-  bytes: number
-}
-
-export interface NotificationQueueRow {
-  id: number
-  bucket: string
-  target_id: string
-  endpoint: string
-  payload: string
-  attempts: number
-}
-
-interface MaxSeqRow {
-  value: number
-}
-
-interface PartRow {
-  part_number: number
-  size: number
-  etag: string
-  blob_id: string
-  uploaded_at: number
-}
-
-interface UploadRow {
-  upload_id: string
-  bucket: string
-  key: Buffer
-  initiated_at: number
-  content_type: string | null
-  metadata: string | null
-  tags: string | null
-  encryption: string | null
-}
-
-export interface ListObjectsResult {
-  contents: ObjectRecord[]
-  commonPrefixes: string[]
-  truncated: boolean
-  nextCursor: Buffer | null
-}
-
-export interface ListVersionsResult {
-  versions: ObjectRecord[]
-  commonPrefixes: string[]
-  truncated: boolean
-  nextKeyMarker: string | null
-  nextVersionIdMarker: string | null
-}
+export { NULL_VERSION, SCHEMA_VERSION }
+export type { BucketRecord, ListObjectsResult, ListVersionsResult, NotificationQueueRow, ObjectInput, ObjectRecord, PartRecord, UploadRecord }
 
 export class MetadataStore {
   db: DatabaseSync
-  statements: Record<string, ReturnType<DatabaseSync['prepare']>>
-  _sequence: number
-  private bucketCache: LRUCache<string, BucketRecord | null>
-  private configCache: LRUCache<string, unknown>
+  private buckets: BucketMetadata
+  private notifications: NotificationMetadata
+  private objects: ObjectMetadata
+  private multipart: MultipartMetadata
 
   constructor(path: string, { bucketCacheSize = 1024, configCacheSize = 4096, cacheTtlMs = 60000 } = {}) {
-    this.bucketCache = new LRUCache<string, BucketRecord | null>(bucketCacheSize, cacheTtlMs)
-    this.configCache = new LRUCache<string, unknown>(configCacheSize, cacheTtlMs)
     this.db = new DatabaseSync(path)
     this.db.exec('PRAGMA journal_mode = WAL')
     this.db.exec('PRAGMA synchronous = NORMAL')
@@ -317,123 +28,10 @@ export class MetadataStore {
     migrateV2ToV3(this.db)
     this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
 
-    this.statements = {
-      createBucket: this.db.prepare('INSERT INTO buckets (name, created_at, region) VALUES (?, ?, ?)'),
-      getBucket: this.db.prepare('SELECT name, created_at, region FROM buckets WHERE name = ?'),
-      listBuckets: this.db.prepare('SELECT name, created_at, region FROM buckets ORDER BY name ASC'),
-      deleteBucket: this.db.prepare('DELETE FROM buckets WHERE name = ?'),
-      countObjects: this.db.prepare('SELECT count(*) AS total FROM objects WHERE bucket = ?'),
-      bucketUsage: this.db.prepare(
-        'SELECT count(*) AS objects, COALESCE(SUM(size), 0) AS bytes FROM objects ' +
-        'WHERE bucket = ? AND is_latest = 1 AND is_delete_marker = 0'),
-
-      enqueueNotification: this.db.prepare(
-        'INSERT INTO notification_queue (bucket, target_id, endpoint, payload, attempts, next_attempt_at, status, created_at) ' +
-        "VALUES (?, ?, ?, ?, 0, ?, 'pending', ?)"),
-      // Atomically flips due rows to 'in-flight' and returns them in one step, so the
-      // periodic worker and an explicit drain() can never both pick up the same row.
-      claimDueNotifications: this.db.prepare(
-        "UPDATE notification_queue SET status = 'in-flight' WHERE id IN (" +
-        "  SELECT id FROM notification_queue WHERE status = 'pending' AND next_attempt_at <= ? ORDER BY id LIMIT ?" +
-        ') RETURNING id, bucket, target_id, endpoint, payload, attempts'),
-      rescheduleNotification: this.db.prepare(
-        "UPDATE notification_queue SET status = 'pending', attempts = ?, next_attempt_at = ? WHERE id = ?"),
-      deadLetterNotification: this.db.prepare("UPDATE notification_queue SET status = 'dead', attempts = ? WHERE id = ?"),
-      deleteNotification: this.db.prepare('DELETE FROM notification_queue WHERE id = ?'),
-
-      getConfig: this.db.prepare('SELECT value FROM bucket_config WHERE bucket = ? AND name = ?'),
-      putConfig: this.db.prepare(
-        'INSERT INTO bucket_config (bucket, name, value) VALUES (?, ?, ?) ' +
-        'ON CONFLICT (bucket, name) DO UPDATE SET value = excluded.value'),
-      deleteConfig: this.db.prepare('DELETE FROM bucket_config WHERE bucket = ? AND name = ?'),
-      deleteAllConfig: this.db.prepare('DELETE FROM bucket_config WHERE bucket = ?'),
-      bucketsWithConfig: this.db.prepare('SELECT bucket, value FROM bucket_config WHERE name = ?'),
-
-      putObject: this.db.prepare(`
-        INSERT INTO objects (bucket, key, version_id, sequence, is_latest, is_delete_marker,
-                             size, etag, content_type, last_modified, blob_id, parts,
-                             metadata, checksums, tags, encryption,
-                             retention_mode, retain_until, legal_hold)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT (bucket, key, version_id) DO UPDATE SET
-          sequence = excluded.sequence, is_latest = excluded.is_latest,
-          is_delete_marker = excluded.is_delete_marker, size = excluded.size,
-          etag = excluded.etag, content_type = excluded.content_type,
-          last_modified = excluded.last_modified, blob_id = excluded.blob_id,
-          parts = excluded.parts, metadata = excluded.metadata,
-          checksums = excluded.checksums, tags = excluded.tags, encryption = excluded.encryption,
-          retention_mode = excluded.retention_mode, retain_until = excluded.retain_until,
-          legal_hold = excluded.legal_hold`),
-      updateLock: this.db.prepare(
-        'UPDATE objects SET retention_mode = ?, retain_until = ?, legal_hold = ? ' +
-        ' WHERE bucket = ? AND key = ? AND version_id = ?'),
-      getVersion: this.db.prepare('SELECT * FROM objects WHERE bucket = ? AND key = ? AND version_id = ?'),
-      getLatest: this.db.prepare(
-        'SELECT * FROM objects WHERE bucket = ? AND key = ? AND is_latest = 1'),
-      allVersionsOfKey: this.db.prepare(
-        'SELECT * FROM objects WHERE bucket = ? AND key = ? ORDER BY sequence DESC'),
-      clearLatest: this.db.prepare(
-        'UPDATE objects SET is_latest = 0 WHERE bucket = ? AND key = ? AND is_latest = 1'),
-      promoteLatest: this.db.prepare(`
-        UPDATE objects SET is_latest = 1
-         WHERE bucket = ? AND key = ? AND version_id = (
-           SELECT version_id FROM objects WHERE bucket = ? AND key = ?
-            ORDER BY sequence DESC LIMIT 1)`),
-      deleteVersion: this.db.prepare(
-        'DELETE FROM objects WHERE bucket = ? AND key = ? AND version_id = ?'),
-      updateTags: this.db.prepare(
-        'UPDATE objects SET tags = ? WHERE bucket = ? AND key = ? AND version_id = ?'),
-      maxSequence: this.db.prepare('SELECT IFNULL(MAX(sequence), 0) AS value FROM objects'),
-
-      scanLatest: this.db.prepare(`
-        SELECT * FROM objects
-         WHERE bucket = ? AND key >= ? AND is_latest = 1 AND is_delete_marker = 0
-         ORDER BY key ASC LIMIT ?`),
-      scanLatestRange: this.db.prepare(`
-        SELECT * FROM objects
-         WHERE bucket = ? AND key >= ? AND key < ? AND is_latest = 1 AND is_delete_marker = 0
-         ORDER BY key ASC LIMIT ?`),
-      scanVersions: this.db.prepare(`
-        SELECT * FROM objects
-         WHERE bucket = ? AND (key > ? OR (key = ? AND sequence < ?))
-         ORDER BY key ASC, sequence DESC LIMIT ?`),
-      scanVersionsRange: this.db.prepare(`
-        SELECT * FROM objects
-         WHERE bucket = ? AND (key > ? OR (key = ? AND sequence < ?)) AND key < ?
-         ORDER BY key ASC, sequence DESC LIMIT ?`),
-      allObjects: this.db.prepare('SELECT blob_id, parts FROM objects WHERE bucket = ?'),
-      allBlobIds: this.db.prepare('SELECT blob_id FROM objects WHERE blob_id IS NOT NULL'),
-      allPartsBlobIds: this.db.prepare('SELECT parts FROM objects WHERE parts IS NOT NULL'),
-      allUploadPartBlobIds: this.db.prepare('SELECT blob_id FROM upload_parts'),
-      deleteAllObjects: this.db.prepare('DELETE FROM objects WHERE bucket = ?'),
-      expiredObjects: this.db.prepare(`
-        SELECT * FROM objects WHERE bucket = ? AND last_modified < ? ORDER BY key ASC`),
-
-      createUpload: this.db.prepare(
-        'INSERT INTO uploads (upload_id, bucket, key, initiated_at, content_type, metadata, tags, encryption) ' +
-        'VALUES (?, ?, ?, ?, ?, ?, ?, ?)'),
-      getUpload: this.db.prepare('SELECT * FROM uploads WHERE upload_id = ?'),
-      deleteUpload: this.db.prepare('DELETE FROM uploads WHERE upload_id = ?'),
-      listUploads: this.db.prepare(
-        'SELECT * FROM uploads WHERE bucket = ? ORDER BY key ASC, upload_id ASC LIMIT ?'),
-      countUploads: this.db.prepare('SELECT count(*) AS total FROM uploads WHERE bucket = ?'),
-      staleUploads: this.db.prepare('SELECT * FROM uploads WHERE bucket = ? AND initiated_at < ?'),
-      staleUploadsGlobal: this.db.prepare('SELECT * FROM uploads WHERE initiated_at < ?'),
-
-      putPart: this.db.prepare(`
-        INSERT INTO upload_parts (upload_id, part_number, size, etag, blob_id, uploaded_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT (upload_id, part_number) DO UPDATE SET
-          size = excluded.size, etag = excluded.etag,
-          blob_id = excluded.blob_id, uploaded_at = excluded.uploaded_at`),
-      getPart: this.db.prepare('SELECT * FROM upload_parts WHERE upload_id = ? AND part_number = ?'),
-      listParts: this.db.prepare(
-        'SELECT * FROM upload_parts WHERE upload_id = ? AND part_number > ? ORDER BY part_number ASC LIMIT ?'),
-      allParts: this.db.prepare('SELECT * FROM upload_parts WHERE upload_id = ? ORDER BY part_number ASC'),
-      deleteParts: this.db.prepare('DELETE FROM upload_parts WHERE upload_id = ?'),
-    }
-
-    this._sequence = (this.statements.maxSequence.get() as unknown as MaxSeqRow).value
+    this.buckets = new BucketMetadata(this.db, { bucketCacheSize, configCacheSize, cacheTtlMs })
+    this.notifications = new NotificationMetadata(this.db)
+    this.objects = new ObjectMetadata(this.db)
+    this.multipart = new MultipartMetadata(this.db)
   }
 
   close(): void {
@@ -452,122 +50,75 @@ export class MetadataStore {
     }
   }
 
-  nextSequence(): number {
-    this._sequence = Math.max(this._sequence + 1, Date.now())
-    return this._sequence
-  }
+  // ── Buckets ──────────────────────────────────────────────────────────
 
   createBucket(name: string, region: string): void {
-    this.statements.createBucket.run(name, Date.now(), region)
-    this.bucketCache.delete(name)
+    this.buckets.createBucket(name, region)
   }
 
   getBucket(name: string): BucketRecord | null {
-    const cached = this.bucketCache.get(name)
-    if (cached !== undefined) return cached
-    const row = this.statements.getBucket.get(name) as unknown as BucketRow | undefined
-    const result = row ? { name: row.name, createdAt: new Date(row.created_at), region: row.region } : null
-    this.bucketCache.set(name, result)
-    return result
+    return this.buckets.getBucket(name)
   }
 
   listBuckets(): BucketRecord[] {
-    return (this.statements.listBuckets.all() as unknown as BucketRow[])
-      .map((row: BucketRow) => ({ name: row.name, createdAt: new Date(row.created_at), region: row.region }))
+    return this.buckets.listBuckets()
   }
 
   deleteBucket(name: string): void {
-    this.statements.deleteAllConfig.run(name)
-    this.statements.deleteAllObjects.run(name)
-    this.statements.deleteBucket.run(name)
-    this.bucketCache.delete(name)
-    this.configCache.clear()
+    this.objects.deleteAllInBucket(name)
+    this.buckets.deleteBucketRow(name)
   }
 
   isBucketEmpty(name: string): boolean {
-    return (this.statements.countObjects.get(name) as unknown as CountRow).total === 0
+    return this.buckets.isBucketEmpty(name)
   }
 
-  /** Current (non-delete-marker) object count and total byte size for a bucket, for quota checks. */
   bucketUsage(bucket: string): { objects: number; bytes: number } {
-    const row = this.statements.bucketUsage.get(bucket) as unknown as UsageRow
-    return { objects: row.objects, bytes: row.bytes }
+    return this.buckets.bucketUsage(bucket)
   }
 
-  enqueueNotification({ bucket, targetId, endpoint, payload, now }: {
-    bucket: string; targetId: string; endpoint: string; payload: string; now: number
-  }): void {
-    this.statements.enqueueNotification.run(bucket, targetId, endpoint, payload, now, now)
-  }
-
-  /** Claims up to `limit` due rows for delivery, marking them 'in-flight' so no other caller can also pick them up. */
-  claimDueNotifications(now: number, limit = 100): NotificationQueueRow[] {
-    return this.statements.claimDueNotifications.all(now, limit) as unknown as NotificationQueueRow[]
-  }
-
-  rescheduleNotification(id: number, attempts: number, nextAttemptAt: number): void {
-    this.statements.rescheduleNotification.run(attempts, nextAttemptAt, id)
-  }
-
-  deadLetterNotification(id: number, attempts: number): void {
-    this.statements.deadLetterNotification.run(attempts, id)
-  }
-
-  deleteNotification(id: number): void {
-    this.statements.deleteNotification.run(id)
-  }
-
-  /**
-   * Config documents are stored as opaque JSON. The caller names the shape it
-   * expects, because only the caller knows which parser produced the document.
-   */
   getConfig<T = Record<string, unknown>>(bucket: string, name: string): T | null {
-    const cacheKey = `${bucket}\x00${name}`
-    const cached = this.configCache.get(cacheKey) as T | null | undefined
-    if (cached !== undefined) return cached as T | null
-    const row = this.statements.getConfig.get(bucket, name) as unknown as ConfigRow | undefined
-    const result = row ? JSON.parse(row.value) as T : null
-    this.configCache.set(cacheKey, result)
-    return result
+    return this.buckets.getConfig<T>(bucket, name)
   }
 
   putConfig(bucket: string, name: string, value: unknown): void {
-    this.statements.putConfig.run(bucket, name, JSON.stringify(value))
-    this.configCache.set(`${bucket}\x00${name}`, value)
+    this.buckets.putConfig(bucket, name, value)
   }
 
   deleteConfig(bucket: string, name: string): void {
-    this.statements.deleteConfig.run(bucket, name)
-    this.configCache.delete(`${bucket}\x00${name}`)
+    this.buckets.deleteConfig(bucket, name)
   }
 
   bucketsWithConfig<T = Record<string, unknown>>(name: string): { bucket: string; value: T }[] {
-    return (this.statements.bucketsWithConfig.all(name) as { bucket: string; value: string }[])
-      .map((row) => ({ bucket: row.bucket, value: JSON.parse(row.value) as T }))
+    return this.buckets.bucketsWithConfig<T>(name)
   }
 
+  // ── Notifications ────────────────────────────────────────────────────
+
+  enqueueNotification(event: { bucket: string; targetId: string; endpoint: string; payload: string; now: number }): void {
+    this.notifications.enqueueNotification(event)
+  }
+
+  claimDueNotifications(now: number, limit = 100): NotificationQueueRow[] {
+    return this.notifications.claimDueNotifications(now, limit)
+  }
+
+  rescheduleNotification(id: number, attempts: number, nextAttemptAt: number): void {
+    this.notifications.rescheduleNotification(id, attempts, nextAttemptAt)
+  }
+
+  deadLetterNotification(id: number, attempts: number): void {
+    this.notifications.deadLetterNotification(id, attempts)
+  }
+
+  deleteNotification(id: number): void {
+    this.notifications.deleteNotification(id)
+  }
+
+  // ── Objects ──────────────────────────────────────────────────────────
+
   putObject(record: ObjectInput): void {
-    this.statements.putObject.run(
-      record.bucket,
-      toKeyBuffer(record.key),
-      record.versionId ?? NULL_VERSION,
-      record.sequence ?? this.nextSequence(),
-      record.isLatest === false ? 0 : 1,
-      record.isDeleteMarker ? 1 : 0,
-      record.size,
-      record.etag,
-      record.contentType ?? null,
-      record.lastModified instanceof Date ? record.lastModified.getTime() : record.lastModified,
-      record.blobId ?? null,
-      record.parts ? JSON.stringify(record.parts) : null,
-      record.metadata && Object.keys(record.metadata).length ? JSON.stringify(record.metadata) : null,
-      record.checksums && Object.keys(record.checksums).length ? JSON.stringify(record.checksums) : null,
-      record.tags && Object.keys(record.tags).length ? JSON.stringify(record.tags) : null,
-      record.encryption ? JSON.stringify(record.encryption) : null,
-      record.retentionMode ?? null,
-      record.retainUntil ? record.retainUntil.getTime() : null,
-      record.legalHold ? 1 : 0,
-    )
+    this.objects.putObject(record)
   }
 
   /** Replaces the Object Lock state of one specific version. */
@@ -576,298 +127,85 @@ export class MetadataStore {
     retainUntil?: Date | null
     legalHold?: boolean
   }): void {
-    this.statements.updateLock.run(
-      lock.retentionMode ?? null,
-      lock.retainUntil ? lock.retainUntil.getTime() : null,
-      lock.legalHold ? 1 : 0,
-      bucket,
-      toKeyBuffer(key),
-      versionId,
-    )
+    this.objects.setLock(bucket, key, versionId, lock)
   }
 
   getObject(bucket: string, key: string, versionId?: string | null): ObjectRecord | null {
-    const row = versionId
-      ? (this.statements.getVersion.get(bucket, toKeyBuffer(key), versionId) as unknown as RawRow | undefined)
-      : (this.statements.getLatest.get(bucket, toKeyBuffer(key)) as unknown as RawRow | undefined)
-    return decodeRow(row)
+    return this.objects.getObject(bucket, key, versionId)
   }
 
   allVersionsOfKey(bucket: string, key: Buffer | string): ObjectRecord[] {
-    return (this.statements.allVersionsOfKey.all(bucket, toKeyBuffer(key)) as unknown as RawRow[]).map(decodeRow).filter((r): r is ObjectRecord => r !== null)
+    return this.objects.allVersionsOfKey(bucket, key)
   }
 
   clearLatest(bucket: string, key: string): void {
-    this.statements.clearLatest.run(bucket, toKeyBuffer(key))
+    this.objects.clearLatest(bucket, key)
   }
 
   promoteLatest(bucket: string, key: string): void {
-    const keyBuffer = toKeyBuffer(key)
-    this.statements.promoteLatest.run(bucket, keyBuffer, bucket, keyBuffer)
+    this.objects.promoteLatest(bucket, key)
   }
 
   deleteVersion(bucket: string, key: string, versionId: string): boolean {
-    return (this.statements.deleteVersion.run(bucket, toKeyBuffer(key), versionId) as { changes: number }).changes > 0
+    return this.objects.deleteVersion(bucket, key, versionId)
   }
 
   setTags(bucket: string, key: string, versionId: string, tags: Record<string, string>): void {
-    this.statements.updateTags.run(
-      tags && Object.keys(tags).length ? JSON.stringify(tags) : null,
-      bucket, toKeyBuffer(key), versionId,
-    )
+    this.objects.setTags(bucket, key, versionId, tags)
   }
 
   blobsInBucket(bucket: string): string[] {
-    const ids: string[] = []
-    for (const row of this.statements.allObjects.all(bucket) as { blob_id: string | null; parts: string | null }[]) {
-      if (row.blob_id) ids.push(row.blob_id)
-      if (row.parts) for (const part of JSON.parse(row.parts) as { blobId: string }[]) ids.push(part.blobId)
-    }
-    return ids
+    return this.objects.blobsInBucket(bucket)
   }
 
   objectsModifiedBefore(bucket: string, cutoff: number): ObjectRecord[] {
-    return (this.statements.expiredObjects.all(bucket, cutoff) as unknown as RawRow[]).map(decodeRow).filter((r): r is ObjectRecord => r !== null)
+    return this.objects.objectsModifiedBefore(bucket, cutoff)
   }
 
-  private _scan(bucket: string, cursor: Buffer, upperBound: Buffer | null, limit: number): RawRow[] {
-    return upperBound
-      ? (this.statements.scanLatestRange.all(bucket, cursor, upperBound, limit) as unknown as RawRow[])
-      : (this.statements.scanLatest.all(bucket, cursor, limit) as unknown as RawRow[])
-  }
-
-  listObjects(bucket: string, {
-    prefix = '', delimiter = '', maxKeys = 1000, startAfter = '', cursor: resumeCursor = null,
-  }: {
+  listObjects(bucket: string, options?: {
     prefix?: string
     delimiter?: string
     maxKeys?: number
     startAfter?: string
     cursor?: Buffer | null
-  } = {}): ListObjectsResult {
-    const prefixBuf = toKeyBuffer(prefix)
-    const delimiterBuf = delimiter ? toKeyBuffer(delimiter) : null
-    const upperBound = prefixUpperBound(prefixBuf)
-
-    let cursor = prefixBuf
-    if (resumeCursor && Buffer.compare(resumeCursor, cursor) > 0) cursor = resumeCursor
-    if (startAfter) {
-      const startAfterBuf = keySuccessor(startAfter)
-      if (Buffer.compare(startAfterBuf, cursor) > 0) cursor = startAfterBuf
-    }
-
-    const contents: ObjectRecord[] = []
-    const commonPrefixes: string[] = []
-    const seenPrefixes = new Set<string>()
-    let truncated = false
-    let nextCursor: Buffer | null = null
-
-    outer: while (contents.length + commonPrefixes.length < maxKeys) {
-      const rows = this._scan(bucket, cursor, upperBound, LIST_BATCH)
-      if (rows.length === 0) break
-
-      for (const row of rows) {
-        const key = Buffer.from(row.key)
-
-        if (delimiterBuf) {
-          const tail = key.subarray(prefixBuf.length)
-          const at = tail.indexOf(delimiterBuf)
-          if (at !== -1) {
-            const groupPrefix = key.subarray(0, prefixBuf.length + at + delimiterBuf.length)
-            const groupKey = groupPrefix.toString('utf8')
-            if (!seenPrefixes.has(groupKey)) {
-              if (contents.length + commonPrefixes.length >= maxKeys) {
-                truncated = true
-                nextCursor = cursor
-                break outer
-              }
-              seenPrefixes.add(groupKey)
-              commonPrefixes.push(groupKey)
-            }
-            const bound = prefixUpperBound(groupPrefix)
-            if (!bound) { cursor = null as unknown as Buffer; break outer }
-            cursor = bound
-            continue outer
-          }
-        }
-
-        if (contents.length + commonPrefixes.length >= maxKeys) {
-          truncated = true
-          nextCursor = cursor
-          break outer
-        }
-        const record = decodeRow(row)
-        if (record) contents.push(record)
-        cursor = keySuccessor(key)
-      }
-
-      if (rows.length < LIST_BATCH) break
-    }
-
-    if (!truncated && cursor && contents.length + commonPrefixes.length >= maxKeys) {
-      truncated = this._scan(bucket, cursor, upperBound, 1).length > 0
-      if (truncated) nextCursor = cursor
-    }
-
-    return {
-      contents,
-      commonPrefixes,
-      truncated,
-      nextCursor: truncated ? nextCursor ?? cursor : null,
-    }
+  }): ListObjectsResult {
+    return this.objects.listObjects(bucket, options)
   }
 
-  listVersions(bucket: string, {
-    prefix = '', delimiter = '', maxKeys = 1000, keyMarker = '', versionIdMarker = '',
-  }: {
+  listVersions(bucket: string, options?: {
     prefix?: string
     delimiter?: string
     maxKeys?: number
     keyMarker?: string
     versionIdMarker?: string
-  } = {}): ListVersionsResult {
-    const prefixBuf = toKeyBuffer(prefix)
-    const delimiterBuf = delimiter ? toKeyBuffer(delimiter) : null
-    const upperBound = prefixUpperBound(prefixBuf)
-
-    let cursorKey = prefixBuf
-    let cursorSequence = Number.MAX_SAFE_INTEGER
-    if (keyMarker) {
-      const markerKey = toKeyBuffer(keyMarker)
-      if (Buffer.compare(markerKey, cursorKey) >= 0) {
-        cursorKey = markerKey
-        cursorSequence = Number.MIN_SAFE_INTEGER
-        if (versionIdMarker) {
-          const row = this.statements.getVersion.get(bucket, markerKey, versionIdMarker) as unknown as RawRow | undefined
-          if (row) cursorSequence = row.sequence
-        }
-      }
-    }
-
-    const scan = (limit: number): RawRow[] => (upperBound
-      ? (this.statements.scanVersionsRange.all(bucket, cursorKey, cursorKey, cursorSequence, upperBound, limit) as unknown as RawRow[])
-      : (this.statements.scanVersions.all(bucket, cursorKey, cursorKey, cursorSequence, limit) as unknown as RawRow[]))
-
-    const versions: ObjectRecord[] = []
-    const commonPrefixes: string[] = []
-    const seenPrefixes = new Set<string>()
-    let truncated = false
-    let nextKeyMarker: string | null = null
-    let nextVersionIdMarker: string | null = null
-
-    outer: while (versions.length + commonPrefixes.length < maxKeys) {
-      const rows = scan(LIST_BATCH)
-      if (rows.length === 0) break
-
-      for (const row of rows) {
-        const key = Buffer.from(row.key)
-
-        if (delimiterBuf) {
-          const tail = key.subarray(prefixBuf.length)
-          const at = tail.indexOf(delimiterBuf)
-          if (at !== -1) {
-            const groupPrefix = key.subarray(0, prefixBuf.length + at + delimiterBuf.length)
-            const groupKey = groupPrefix.toString('utf8')
-            if (!seenPrefixes.has(groupKey)) {
-              if (versions.length + commonPrefixes.length >= maxKeys) {
-                truncated = true
-                break outer
-              }
-              seenPrefixes.add(groupKey)
-              commonPrefixes.push(groupKey)
-            }
-            const bound = prefixUpperBound(groupPrefix)
-            if (!bound) break outer
-            cursorKey = bound
-            cursorSequence = Number.MAX_SAFE_INTEGER
-            continue outer
-          }
-        }
-
-        if (versions.length + commonPrefixes.length >= maxKeys) {
-          truncated = true
-          break outer
-        }
-        const record = decodeRow(row)
-        if (record) versions.push(record)
-        cursorKey = key
-        cursorSequence = row.sequence
-        nextKeyMarker = key.toString('utf8')
-        nextVersionIdMarker = record?.versionId ?? null
-      }
-
-      if (rows.length < LIST_BATCH) break
-    }
-
-    if (!truncated && versions.length + commonPrefixes.length >= maxKeys) {
-      truncated = scan(1).length > 0
-    }
-
-    return {
-      versions,
-      commonPrefixes,
-      truncated,
-      nextKeyMarker: truncated ? nextKeyMarker : null,
-      nextVersionIdMarker: truncated ? nextVersionIdMarker : null,
-    }
+  }): ListVersionsResult {
+    return this.objects.listVersions(bucket, options)
   }
 
-  createUpload({ uploadId, bucket, key, contentType, metadata, tags, encryption }: {
-    uploadId: string
-    bucket: string
-    key: string
-    contentType?: string
-    metadata?: Record<string, string>
-    tags?: Record<string, string>
-    encryption?: EncryptionContext | null
-  }): void {
-    this.statements.createUpload.run(
-      uploadId, bucket, toKeyBuffer(key), Date.now(),
-      contentType ?? null,
-      metadata && Object.keys(metadata).length ? JSON.stringify(metadata) : null,
-      tags && Object.keys(tags).length ? JSON.stringify(tags) : null,
-      encryption ? JSON.stringify(encryption) : null,
-    )
-  }
+  // ── Multipart uploads ────────────────────────────────────────────────
 
-  private _decodeUpload(row: UploadRow | undefined): UploadRecord | null {
-    if (!row) return null
-    return {
-      uploadId: row.upload_id,
-      bucket: row.bucket,
-      key: Buffer.from(row.key),
-      initiatedAt: new Date(row.initiated_at),
-      contentType: row.content_type ?? undefined,
-      metadata: row.metadata ? JSON.parse(row.metadata) : {},
-      tags: row.tags ? JSON.parse(row.tags) : {},
-      encryption: row.encryption ? JSON.parse(row.encryption) : null,
-    }
+  createUpload(input: Parameters<MultipartMetadata['createUpload']>[0]): void {
+    this.multipart.createUpload(input)
   }
 
   getUpload(uploadId: string): UploadRecord | null {
-    return this._decodeUpload(this.statements.getUpload.get(uploadId) as unknown as UploadRow | undefined)
+    return this.multipart.getUpload(uploadId)
   }
 
   listUploads(bucket: string, maxUploads = 1000): UploadRecord[] {
-    return (this.statements.listUploads.all(bucket, maxUploads) as unknown as UploadRow[])
-      .map((row) => this._decodeUpload(row))
-      .filter((u): u is UploadRecord => u !== null)
+    return this.multipart.listUploads(bucket, maxUploads)
   }
 
   uploadCount(bucket: string): number {
-    return (this.statements.countUploads.get(bucket) as unknown as CountRow).total
+    return this.multipart.uploadCount(bucket)
   }
 
   uploadsStartedBefore(bucket: string, cutoff: number): UploadRecord[] {
-    return (this.statements.staleUploads.all(bucket, cutoff) as unknown as UploadRow[])
-      .map((row) => this._decodeUpload(row))
-      .filter((u): u is UploadRecord => u !== null)
+    return this.multipart.uploadsStartedBefore(bucket, cutoff)
   }
 
   allStaleUploads(cutoff: number): UploadRecord[] {
-    return (this.statements.staleUploadsGlobal.all(cutoff) as unknown as UploadRow[])
-      .map((row) => this._decodeUpload(row))
-      .filter((u): u is UploadRecord => u !== null)
+    return this.multipart.allStaleUploads(cutoff)
   }
 
   /**
@@ -877,60 +215,28 @@ export class MetadataStore {
    */
   allReferencedBlobIds(): Set<string> {
     const ids = new Set<string>()
-    for (const row of this.statements.allBlobIds.all() as { blob_id: string }[]) {
-      ids.add(row.blob_id)
-    }
-    for (const row of this.statements.allPartsBlobIds.all() as { parts: string }[]) {
-      try {
-        for (const part of JSON.parse(row.parts) as { blobId: string }[]) {
-          if (part.blobId) ids.add(part.blobId)
-        }
-      } catch { /* skip malformed parts JSON */ }
-    }
-    for (const row of this.statements.allUploadPartBlobIds.all() as { blob_id: string }[]) {
-      ids.add(row.blob_id)
-    }
+    for (const id of this.objects.allBlobIds()) ids.add(id)
+    for (const id of this.multipart.allUploadPartBlobIds()) ids.add(id)
     return ids
   }
 
-  putPart({ uploadId, partNumber, size, etag, blobId }: {
-    uploadId: string
-    partNumber: number
-    size: number
-    etag: string
-    blobId: string
-  }): void {
-    this.statements.putPart.run(uploadId, partNumber, size, etag, blobId, Date.now())
+  putPart(input: Parameters<MultipartMetadata['putPart']>[0]): void {
+    this.multipart.putPart(input)
   }
 
   getPart(uploadId: string, partNumber: number): PartRecord | null {
-    const row = this.statements.getPart.get(uploadId, partNumber) as unknown as PartRow | undefined
-    return row
-      ? { partNumber: row.part_number, size: row.size, etag: row.etag, blobId: row.blob_id, uploadedAt: new Date(row.uploaded_at) }
-      : null
+    return this.multipart.getPart(uploadId, partNumber)
   }
 
-  listParts(uploadId: string, { partNumberMarker = 0, maxParts = 1000 } = {}): PartRecord[] {
-    return (this.statements.listParts.all(uploadId, partNumberMarker, maxParts) as unknown as PartRow[]).map((row) => ({
-      partNumber: row.part_number,
-      size: row.size,
-      etag: row.etag,
-      blobId: row.blob_id,
-      uploadedAt: new Date(row.uploaded_at),
-    }))
+  listParts(uploadId: string, options?: { partNumberMarker?: number; maxParts?: number }): PartRecord[] {
+    return this.multipart.listParts(uploadId, options)
   }
 
   allParts(uploadId: string): PartRecord[] {
-    return (this.statements.allParts.all(uploadId) as unknown as PartRow[]).map((row) => ({
-      partNumber: row.part_number,
-      size: row.size,
-      etag: row.etag,
-      blobId: row.blob_id,
-    }))
+    return this.multipart.allParts(uploadId)
   }
 
   deleteUpload(uploadId: string): void {
-    this.statements.deleteParts.run(uploadId)
-    this.statements.deleteUpload.run(uploadId)
+    this.multipart.deleteUpload(uploadId)
   }
 }

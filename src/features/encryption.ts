@@ -48,10 +48,10 @@ export interface EncryptionContext {
   mode: string
   algorithm: string
   iv: string
-  keyMd5?: string
-  wrappedKey?: string
-  wrapIv?: string
-  wrapTag?: string
+  keyMd5?: string | undefined
+  wrappedKey?: string | undefined
+  wrapIv?: string | undefined
+  wrapTag?: string | undefined
 }
 
 export interface CreatedEncryption {
