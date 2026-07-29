@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { randomBytes, createHash } from 'node:crypto'
-import { mkdtemp, rm, readdir } from 'node:fs/promises'
+import { mkdtemp, rm, readdir as fsReaddir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
@@ -96,7 +96,7 @@ describe('objects', () => {
     const record = store.getObject('bkt', key)
     assert.equal((await readAll(store.createObjectStream(record))).toString(), 'safe')
     // Nothing escaped the data directory: blobs are named independently of keys.
-    const entries = await readdir(store.blobs.dataDir)
+    const entries = await fsReaddir(store.blobs.dataDir)
     assert.equal(entries.every((entry) => /^[0-9a-f]{2}$/.test(entry)), true)
   })
 
@@ -410,5 +410,67 @@ describe('dependency injection', () => {
     assert.equal(typeof store.buckets.requireBucket, 'function')
     assert.equal(typeof store.objects.putObject, 'function')
     assert.equal(typeof store.multipart.uploadPart, 'function')
+  })
+})
+
+describe('blobstore EXDEV resilience', () => {
+  let blobs, dataDir
+
+  before(async () => {
+    dataDir = await mkdtemp(join(root, 'blobstore-exdev-'))
+    blobs = new BlobStore(dataDir)
+    await blobs.init()
+  })
+
+  after(async () => {
+    await rm(dataDir, { recursive: true, force: true })
+  })
+
+  it('writes a blob', async () => {
+    const { blobId, size } = await blobs.write(Readable.from([Buffer.from('hello blob')]), { algorithms: ['md5'] })
+    assert.equal(size, 10)
+    assert.equal(await blobs.size(blobId), 10)
+  })
+
+  it('cleans up the temp file when the write pipeline fails', async () => {
+    const brokenStream = new Readable({
+      read() {
+        this.destroy(new Error('stream failure'))
+      },
+    })
+
+    await assert.rejects(
+      blobs.write(brokenStream, { algorithms: ['md5'] }),
+      (err) => err.message === 'stream failure',
+    )
+  })
+
+  it('creates temp files inside the data directory, not in a separate tmp dir', async () => {
+    const { blobId } = await blobs.write(Readable.from([Buffer.from('temp location test')]), { algorithms: ['md5'] })
+    const blobDir = blobId.slice(0, 2)
+    const blobSubDir = blobId.slice(2, 4)
+
+    const entries = await fsReaddir(join(blobs.dataDir, blobDir, blobSubDir))
+    const tmpEntries = entries.filter((e) => e.includes('.tmp-'))
+    assert.equal(tmpEntries.length, 0, 'no temp files should remain after write')
+    assert.ok(entries.includes(blobId), 'the blob file should exist in the data directory')
+  })
+
+  it('writes a blob successfully and the file is accessible at the expected path', async () => {
+    const isolatedDir = await mkdtemp(join(root, 'blobstore-verify-path-'))
+    const fallbackBlobs = new BlobStore(isolatedDir)
+    await fallbackBlobs.init()
+
+    try {
+      const { blobId, size } = await fallbackBlobs.write(
+        Readable.from([Buffer.from('exdev fallback test')]),
+        { algorithms: ['md5'] },
+      )
+      assert.equal(size, 19)
+      assert.equal(await fallbackBlobs.size(blobId), 19)
+      assert.equal((await fsReaddir(join(fallbackBlobs.dataDir, blobId.slice(0, 2), blobId.slice(2, 4)))).includes(blobId), true)
+    } finally {
+      await rm(isolatedDir, { recursive: true, force: true })
+    }
   })
 })

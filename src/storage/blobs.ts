@@ -52,12 +52,14 @@ export class BlobStore {
 
   async write(source: NodeJS.ReadableStream | NodeJS.ReadableStream[], { algorithms = ['md5'], transforms = [] as NodeJS.ReadWriteStream[], maxSize = 0 } = {}): Promise<WriteResult> {
     const blobId = randomUUID().replaceAll('-', '')
-    const tmpPath = join(this.tmpDir, blobId)
+    const finalPath = this.path(blobId)
+    const tmpPath = join(dirname(finalPath), `.${blobId}.tmp-${Date.now()}`)
     const hasher = new HashingStream(algorithms)
     const chain = Array.isArray(source) ? source : [source]
     const sizeGuard = maxSize > 0 ? [new MaxSizeStream(maxSize)] : []
 
     try {
+      await mkdir(dirname(finalPath), { recursive: true })
       await (pipeline as (...args: unknown[]) => Promise<void>)(
         ...chain as NodeJS.ReadableStream[], hasher, ...transforms as NodeJS.ReadWriteStream[], ...sizeGuard,
         createWriteStream(tmpPath, { flags: 'wx', mode: 0o600 }))
@@ -69,9 +71,28 @@ export class BlobStore {
         await handle.close()
       }
 
-      const finalPath = this.path(blobId)
-      await mkdir(dirname(finalPath), { recursive: true })
-      await rename(tmpPath, finalPath)
+      try {
+        await rename(tmpPath, finalPath)
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'EXDEV') {
+          const src = await open(tmpPath, 'r')
+          try {
+            const dst = createWriteStream(finalPath, { flags: 'wx', mode: 0o600 })
+            await pipeline(src.createReadStream(), dst)
+            const finalHandle = await open(finalPath, 'r+')
+            try {
+              await finalHandle.sync()
+            } finally {
+              await finalHandle.close()
+            }
+          } finally {
+            await src.close()
+          }
+          await rm(tmpPath, { force: true })
+        } else {
+          throw err
+        }
+      }
       await fsyncDirectory(dirname(finalPath))
 
       return { blobId, size: hasher.bytesWritten, hasher }

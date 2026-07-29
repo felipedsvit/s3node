@@ -49,6 +49,8 @@ export type { StoreContext, StoreLimits } from './context.js'
 export { BucketService } from './buckets.js'
 export { ObjectService } from './objects.js'
 export { MultipartService } from './multipart.js'
+export { GarbageCollector } from './gc.js'
+export { MultipartCleanup } from './multipartCleanup.js'
 export type * from './types.js'
 
 export interface ObjectStoreOptions {

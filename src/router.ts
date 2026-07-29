@@ -8,6 +8,8 @@ import type { S3NodeServer } from './server.js'
 
 type HandlerFn = (ctx: RequestContext, res: ServerResponse, deps: { store: ObjectStore; server: S3NodeServer }) => void | Promise<void>
 
+type Matcher = (ctx: RequestContext) => boolean
+
 const NOT_IMPLEMENTED_SUBRESOURCES = [
   'acl', 'website', 'replication', 'encryption', 'accelerate',
   'logging', 'requestPayment', 'analytics', 'inventory', 'metrics', 'publicAccessBlock',
@@ -22,126 +24,142 @@ function rejectUnimplemented(ctx: RequestContext): void {
   }
 }
 
+// ── Matcher helpers ──────────────────────────────────────────────────
+
+const method = (m: string): Matcher => (ctx) => ctx.method === m
+
+const hasQuery = (name: string): Matcher => (ctx) => ctx.query.has(name)
+
+const hasQueryVal = (name: string, val: string): Matcher => (ctx) => ctx.query.get(name) === val
+
+const hasTruthy = (name: string): Matcher => (ctx) => !!ctx.query.get(name)
+
+const hasHeader = (name: string): Matcher => (ctx) => ctx.headers[name] !== undefined
+
+const isBucketOp: Matcher = (ctx) => !!ctx.bucket && !ctx.key
+
+const isObjectOp: Matcher = (ctx) => !!ctx.bucket && !!ctx.key
+
+const noBucket: Matcher = (ctx) => !ctx.bucket
+
+const and = (...fns: Matcher[]): Matcher => (ctx) => {
+  for (const fn of fns) if (!fn(ctx)) return false
+  return true
+}
+
+// ── Route entries ────────────────────────────────────────────────────
+
+interface RouteDef {
+  methods: string[]
+  matcher: Matcher
+  handler: HandlerFn
+  action: string
+  selfAuthenticating?: boolean
+  /** Only set for routes where ctx.bucket is empty (e.g. ListBuckets). */
+  fixedResource?: string
+}
+
+const ROUTES: RouteDef[] = [
+  /* Service-level — no bucket */
+  { methods: ['GET'],         matcher: noBucket,                                  handler: handlers.listBuckets as HandlerFn,          action: 's3:ListAllMyBuckets',    fixedResource: 'arn:aws:s3:::*' },
+
+  /* ── Bucket-level ─────────────────────────────────────────────── */
+
+  /* PUT */
+  { methods: ['PUT'],         matcher: and(isBucketOp, hasQuery('versioning')),   handler: handlers.putBucketVersioning as HandlerFn,  action: 's3:PutBucketVersioning' },
+  { methods: ['PUT'],         matcher: and(isBucketOp, hasQuery('policy')),       handler: handlers.putBucketPolicy as HandlerFn,      action: 's3:PutBucketPolicy' },
+  { methods: ['PUT'],         matcher: and(isBucketOp, hasQuery('cors')),         handler: handlers.putBucketCors as HandlerFn,        action: 's3:PutBucketCORS' },
+  { methods: ['PUT'],         matcher: and(isBucketOp, hasQuery('lifecycle')),    handler: handlers.putBucketLifecycle as HandlerFn,   action: 's3:PutLifecycleConfiguration' },
+  { methods: ['PUT'],         matcher: and(isBucketOp, hasQuery('tagging')),      handler: handlers.putBucketTagging as HandlerFn,     action: 's3:PutBucketTagging' },
+  { methods: ['PUT'],         matcher: and(isBucketOp, hasQuery('notification')), handler: handlers.putBucketNotification as HandlerFn,action: 's3:PutBucketNotification' },
+  { methods: ['PUT'],         matcher: and(isBucketOp, hasQuery('object-lock')),  handler: handlers.putBucketObjectLock as HandlerFn,  action: 's3:PutBucketObjectLockConfiguration' },
+  { methods: ['PUT'],         matcher: isBucketOp,                                handler: handlers.createBucket as HandlerFn,         action: 's3:CreateBucket' },
+
+  /* DELETE */
+  { methods: ['DELETE'],      matcher: and(isBucketOp, hasQuery('policy')),       handler: handlers.deleteBucketPolicy as HandlerFn,   action: 's3:DeleteBucketPolicy' },
+  { methods: ['DELETE'],      matcher: and(isBucketOp, hasQuery('cors')),         handler: handlers.deleteBucketCors as HandlerFn,     action: 's3:PutBucketCORS' },
+  { methods: ['DELETE'],      matcher: and(isBucketOp, hasQuery('lifecycle')),    handler: handlers.deleteBucketLifecycle as HandlerFn,action: 's3:PutLifecycleConfiguration' },
+  { methods: ['DELETE'],      matcher: and(isBucketOp, hasQuery('tagging')),      handler: handlers.deleteBucketTagging as HandlerFn,  action: 's3:PutBucketTagging' },
+  { methods: ['DELETE'],      matcher: isBucketOp,                                handler: handlers.deleteBucket as HandlerFn,         action: 's3:DeleteBucket' },
+
+  /* HEAD */
+  { methods: ['HEAD'],        matcher: isBucketOp,                                handler: handlers.headBucket as HandlerFn,           action: 's3:ListBucket' },
+
+  /* POST */
+  { methods: ['POST'],        matcher: and(isBucketOp, hasQuery('delete')),       handler: handlers.deleteObjects as HandlerFn,        action: 's3:DeleteObject' },
+  { methods: ['POST'],        matcher: isBucketOp,                                handler: handlers.postObject as HandlerFn,           action: 's3:PutObject',           selfAuthenticating: true },
+
+  /* GET */
+  { methods: ['GET'],         matcher: and(isBucketOp, hasQuery('location')),     handler: handlers.getBucketLocation as HandlerFn,    action: 's3:GetBucketLocation' },
+  { methods: ['GET'],         matcher: and(isBucketOp, hasQuery('versioning')),   handler: handlers.getBucketVersioning as HandlerFn,  action: 's3:GetBucketVersioning' },
+  { methods: ['GET'],         matcher: and(isBucketOp, hasQuery('policy')),       handler: handlers.getBucketPolicy as HandlerFn,      action: 's3:GetBucketPolicy' },
+  { methods: ['GET'],         matcher: and(isBucketOp, hasQuery('cors')),         handler: handlers.getBucketCors as HandlerFn,        action: 's3:GetBucketCORS' },
+  { methods: ['GET'],         matcher: and(isBucketOp, hasQuery('lifecycle')),    handler: handlers.getBucketLifecycle as HandlerFn,   action: 's3:GetLifecycleConfiguration' },
+  { methods: ['GET'],         matcher: and(isBucketOp, hasQuery('tagging')),      handler: handlers.getBucketTagging as HandlerFn,     action: 's3:GetBucketTagging' },
+  { methods: ['GET'],         matcher: and(isBucketOp, hasQuery('notification')), handler: handlers.getBucketNotification as HandlerFn,action: 's3:GetBucketNotification' },
+  { methods: ['GET'],         matcher: and(isBucketOp, hasQuery('object-lock')),  handler: handlers.getBucketObjectLock as HandlerFn,  action: 's3:GetBucketObjectLockConfiguration' },
+  { methods: ['GET'],         matcher: and(isBucketOp, hasQuery('versions')),     handler: handlers.listObjectVersions as HandlerFn,   action: 's3:ListBucketVersions' },
+  { methods: ['GET'],         matcher: and(isBucketOp, hasQuery('uploads')),      handler: handlers.listMultipartUploads as HandlerFn, action: 's3:ListBucketMultipartUploads' },
+  { methods: ['GET'],         matcher: and(isBucketOp, hasQueryVal('list-type', '2')), handler: handlers.listObjectsV2 as HandlerFn,  action: 's3:ListBucket' },
+  { methods: ['GET'],         matcher: isBucketOp,                                handler: handlers.listObjectsV1 as HandlerFn,       action: 's3:ListBucket' },
+
+  /* ── Object-level ──────────────────────────────────────────────── */
+
+  /* PUT */
+  { methods: ['PUT'],         matcher: and(isObjectOp, hasQuery('tagging')),      handler: handlers.putObjectTagging as HandlerFn,     action: 's3:PutObjectTagging' },
+  { methods: ['PUT'],         matcher: and(isObjectOp, hasQuery('retention')),    handler: handlers.putObjectRetention as HandlerFn,   action: 's3:PutObjectRetention' },
+  { methods: ['PUT'],         matcher: and(isObjectOp, hasQuery('legal-hold')),   handler: handlers.putObjectLegalHold as HandlerFn,   action: 's3:PutObjectLegalHold' },
+  { methods: ['PUT'],         matcher: and(isObjectOp, hasTruthy('uploadId'), hasQuery('partNumber'), hasHeader('x-amz-copy-source')), handler: handlers.uploadPartCopy as HandlerFn, action: 's3:PutObject' },
+  { methods: ['PUT'],         matcher: and(isObjectOp, hasTruthy('uploadId'), hasQuery('partNumber')), handler: handlers.uploadPart as HandlerFn, action: 's3:PutObject' },
+  { methods: ['PUT'],         matcher: and(isObjectOp, hasHeader('x-amz-copy-source')), handler: handlers.copyObject as HandlerFn, action: 's3:PutObject' },
+  { methods: ['PUT'],         matcher: isObjectOp,                                handler: handlers.putObject as HandlerFn,           action: 's3:PutObject' },
+
+  /* POST */
+  { methods: ['POST'],        matcher: and(isObjectOp, hasQuery('uploads')),      handler: handlers.createMultipartUpload as HandlerFn,action: 's3:PutObject' },
+  { methods: ['POST'],        matcher: and(isObjectOp, hasTruthy('uploadId')),    handler: handlers.completeMultipartUpload as HandlerFn, action: 's3:PutObject' },
+
+  /* GET */
+  { methods: ['GET'],         matcher: and(isObjectOp, hasQuery('tagging')),      handler: handlers.getObjectTagging as HandlerFn,     action: 's3:GetObjectTagging' },
+  { methods: ['GET'],         matcher: and(isObjectOp, hasQuery('retention')),    handler: handlers.getObjectRetention as HandlerFn,   action: 's3:GetObjectRetention' },
+  { methods: ['GET'],         matcher: and(isObjectOp, hasQuery('legal-hold')),   handler: handlers.getObjectLegalHold as HandlerFn,   action: 's3:GetObjectLegalHold' },
+  { methods: ['GET'],         matcher: and(isObjectOp, hasTruthy('uploadId')),    handler: handlers.listParts as HandlerFn,            action: 's3:ListMultipartUploadParts' },
+  { methods: ['GET'],         matcher: isObjectOp,                                handler: handlers.getObject as HandlerFn,            action: 's3:GetObject' },
+
+  /* HEAD */
+  { methods: ['HEAD'],        matcher: isObjectOp,                                handler: handlers.headObject as HandlerFn,           action: 's3:GetObject' },
+
+  /* DELETE */
+  { methods: ['DELETE'],      matcher: and(isObjectOp, hasQuery('tagging')),      handler: handlers.deleteObjectTagging as HandlerFn,  action: 's3:DeleteObjectTagging' },
+  { methods: ['DELETE'],      matcher: and(isObjectOp, hasTruthy('uploadId')),    handler: handlers.abortMultipartUpload as HandlerFn, action: 's3:AbortMultipartUpload' },
+  { methods: ['DELETE'],      matcher: isObjectOp,                                handler: handlers.deleteObject as HandlerFn,         action: 's3:DeleteObject' },
+]
+
+// ── Resolution ──────────────────────────────────────────────────────
+
 interface Route {
   handler: HandlerFn
   action: string
   resource?: string
-  /**
-   * The handler carries out its own authentication and authorization, so the
-   * server must not run the standard SigV4 path first. Only browser-based POST
-   * uploads qualify: their credentials live in the form policy, which cannot be
-   * read until the multipart body has been parsed.
-   */
   selfAuthenticating?: boolean
 }
 
-const route = (handler: HandlerFn, action: string, options: { selfAuthenticating?: boolean } = {}): Route =>
-  ({ handler, action, ...options })
-
-function bucketRoute(ctx: RequestContext): Route {
-  const { method, query } = ctx
-
-  if (method === 'PUT') {
-    if (query.has('versioning')) return route(handlers.putBucketVersioning as HandlerFn, 's3:PutBucketVersioning')
-    if (query.has('policy')) return route(handlers.putBucketPolicy as HandlerFn, 's3:PutBucketPolicy')
-    if (query.has('cors')) return route(handlers.putBucketCors as HandlerFn, 's3:PutBucketCORS')
-    if (query.has('lifecycle')) return route(handlers.putBucketLifecycle as HandlerFn, 's3:PutLifecycleConfiguration')
-    if (query.has('tagging')) return route(handlers.putBucketTagging as HandlerFn, 's3:PutBucketTagging')
-    if (query.has('notification')) return route(handlers.putBucketNotification as HandlerFn, 's3:PutBucketNotification')
-    if (query.has('object-lock')) return route(handlers.putBucketObjectLock as HandlerFn, 's3:PutBucketObjectLockConfiguration')
-    return route(handlers.createBucket as HandlerFn, 's3:CreateBucket')
-  }
-
-  if (method === 'DELETE') {
-    if (query.has('policy')) return route(handlers.deleteBucketPolicy as HandlerFn, 's3:DeleteBucketPolicy')
-    if (query.has('cors')) return route(handlers.deleteBucketCors as HandlerFn, 's3:PutBucketCORS')
-    if (query.has('lifecycle')) return route(handlers.deleteBucketLifecycle as HandlerFn, 's3:PutLifecycleConfiguration')
-    if (query.has('tagging')) return route(handlers.deleteBucketTagging as HandlerFn, 's3:PutBucketTagging')
-    return route(handlers.deleteBucket as HandlerFn, 's3:DeleteBucket')
-  }
-
-  if (method === 'HEAD') return route(handlers.headBucket as HandlerFn, 's3:ListBucket')
-
-  if (method === 'POST') {
-    if (query.has('delete')) return route(handlers.deleteObjects as HandlerFn, 's3:DeleteObject')
-    return route(handlers.postObject as HandlerFn, 's3:PutObject', { selfAuthenticating: true })
-  }
-
-  if (method === 'GET') {
-    if (query.has('location')) return route(handlers.getBucketLocation as HandlerFn, 's3:GetBucketLocation')
-    if (query.has('versioning')) return route(handlers.getBucketVersioning as HandlerFn, 's3:GetBucketVersioning')
-    if (query.has('policy')) return route(handlers.getBucketPolicy as HandlerFn, 's3:GetBucketPolicy')
-    if (query.has('cors')) return route(handlers.getBucketCors as HandlerFn, 's3:GetBucketCORS')
-    if (query.has('lifecycle')) return route(handlers.getBucketLifecycle as HandlerFn, 's3:GetLifecycleConfiguration')
-    if (query.has('tagging')) return route(handlers.getBucketTagging as HandlerFn, 's3:GetBucketTagging')
-    if (query.has('notification')) return route(handlers.getBucketNotification as HandlerFn, 's3:GetBucketNotification')
-    if (query.has('object-lock')) return route(handlers.getBucketObjectLock as HandlerFn, 's3:GetBucketObjectLockConfiguration')
-    if (query.has('versions')) return route(handlers.listObjectVersions as HandlerFn, 's3:ListBucketVersions')
-    if (query.has('uploads')) return route(handlers.listMultipartUploads as HandlerFn, 's3:ListBucketMultipartUploads')
-    return query.get('list-type') === '2'
-      ? route(handlers.listObjectsV2 as HandlerFn, 's3:ListBucket')
-      : route(handlers.listObjectsV1 as HandlerFn, 's3:ListBucket')
-  }
-
-  throw new S3Error('MethodNotAllowed')
-}
-
-function objectRoute(ctx: RequestContext): Route {
-  const { method, query, headers } = ctx
-  const uploadId = query.get('uploadId')
-
-  if (method === 'PUT') {
-    if (query.has('tagging')) return route(handlers.putObjectTagging as HandlerFn, 's3:PutObjectTagging')
-    if (query.has('retention')) return route(handlers.putObjectRetention as HandlerFn, 's3:PutObjectRetention')
-    if (query.has('legal-hold')) return route(handlers.putObjectLegalHold as HandlerFn, 's3:PutObjectLegalHold')
-    if (uploadId && query.has('partNumber')) {
-      // UploadPartCopy is UploadPart plus a copy source; the source object is
-      // read server-side, so the caller also needs GetObject on it.
-      return headers['x-amz-copy-source']
-        ? route(handlers.uploadPartCopy as HandlerFn, 's3:PutObject')
-        : route(handlers.uploadPart as HandlerFn, 's3:PutObject')
-    }
-    if (headers['x-amz-copy-source']) return route(handlers.copyObject as HandlerFn, 's3:PutObject')
-    return route(handlers.putObject as HandlerFn, 's3:PutObject')
-  }
-
-  if (method === 'POST') {
-    if (query.has('uploads')) return route(handlers.createMultipartUpload as HandlerFn, 's3:PutObject')
-    if (uploadId) return route(handlers.completeMultipartUpload as HandlerFn, 's3:PutObject')
-    throw new S3Error('MethodNotAllowed')
-  }
-
-  if (method === 'GET') {
-    if (query.has('tagging')) return route(handlers.getObjectTagging as HandlerFn, 's3:GetObjectTagging')
-    if (query.has('retention')) return route(handlers.getObjectRetention as HandlerFn, 's3:GetObjectRetention')
-    if (query.has('legal-hold')) return route(handlers.getObjectLegalHold as HandlerFn, 's3:GetObjectLegalHold')
-    if (uploadId) return route(handlers.listParts as HandlerFn, 's3:ListMultipartUploadParts')
-    return route(handlers.getObject as HandlerFn, 's3:GetObject')
-  }
-
-  if (method === 'HEAD') return route(handlers.headObject as HandlerFn, 's3:GetObject')
-
-  if (method === 'DELETE') {
-    if (query.has('tagging')) return route(handlers.deleteObjectTagging as HandlerFn, 's3:DeleteObjectTagging')
-    if (uploadId) return route(handlers.abortMultipartUpload as HandlerFn, 's3:AbortMultipartUpload')
-    return route(handlers.deleteObject as HandlerFn, 's3:DeleteObject')
-  }
-
-  throw new S3Error('MethodNotAllowed')
-}
-
 export function resolveRoute(ctx: RequestContext): Route & { resource: string } {
+  /* Service-level: no bucket — only ListBuckets is valid. */
   if (!ctx.bucket) {
     if (ctx.method === 'GET') {
-      return { ...route(handlers.listBuckets as HandlerFn, 's3:ListAllMyBuckets'), resource: 'arn:aws:s3:::*' }
+      return { handler: handlers.listBuckets as HandlerFn, action: 's3:ListAllMyBuckets', resource: 'arn:aws:s3:::*' }
     }
     throw new S3Error('MethodNotAllowed')
   }
 
   rejectUnimplemented(ctx)
-  const resolved = ctx.key ? objectRoute(ctx) : bucketRoute(ctx)
-  return {
-    ...resolved,
-    resource: ctx.key ? objectArn(ctx.bucket, ctx.key) : bucketArn(ctx.bucket),
+
+  for (const def of ROUTES) {
+    if (!def.methods.includes(ctx.method!)) continue
+    if (!def.matcher(ctx)) continue
+    const resource = def.fixedResource ?? (ctx.key ? objectArn(ctx.bucket, ctx.key) : bucketArn(ctx.bucket))
+    return { handler: def.handler, action: def.action, resource, selfAuthenticating: def.selfAuthenticating }
   }
+
+  throw new S3Error('MethodNotAllowed')
 }

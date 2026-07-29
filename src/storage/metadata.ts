@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite'
 import type { EncryptionContext } from '../features/encryption.js'
 import { keySuccessor, prefixUpperBound, toKeyBuffer } from '../util/bytes.js'
 import type { BlobPart } from './blobs.js'
+import { LRUCache } from './cache.js'
 
 export const SCHEMA_VERSION = 3
 export const NULL_VERSION = 'null'
@@ -268,8 +269,12 @@ export class MetadataStore {
   db: DatabaseSync
   statements: Record<string, ReturnType<DatabaseSync['prepare']>>
   _sequence: number
+  private bucketCache: LRUCache<string, BucketRecord | null>
+  private configCache: LRUCache<string, unknown>
 
-  constructor(path: string) {
+  constructor(path: string, { bucketCacheSize = 1024, configCacheSize = 4096, cacheTtlMs = 60000 } = {}) {
+    this.bucketCache = new LRUCache<string, BucketRecord | null>(bucketCacheSize, cacheTtlMs)
+    this.configCache = new LRUCache<string, unknown>(configCacheSize, cacheTtlMs)
     this.db = new DatabaseSync(path)
     this.db.exec('PRAGMA journal_mode = WAL')
     this.db.exec('PRAGMA synchronous = NORMAL')
@@ -349,6 +354,9 @@ export class MetadataStore {
          WHERE bucket = ? AND (key > ? OR (key = ? AND sequence < ?)) AND key < ?
          ORDER BY key ASC, sequence DESC LIMIT ?`),
       allObjects: this.db.prepare('SELECT blob_id, parts FROM objects WHERE bucket = ?'),
+      allBlobIds: this.db.prepare('SELECT blob_id FROM objects WHERE blob_id IS NOT NULL'),
+      allPartsBlobIds: this.db.prepare('SELECT parts FROM objects WHERE parts IS NOT NULL'),
+      allUploadPartBlobIds: this.db.prepare('SELECT blob_id FROM upload_parts'),
       deleteAllObjects: this.db.prepare('DELETE FROM objects WHERE bucket = ?'),
       expiredObjects: this.db.prepare(`
         SELECT * FROM objects WHERE bucket = ? AND last_modified < ? ORDER BY key ASC`),
@@ -362,6 +370,7 @@ export class MetadataStore {
         'SELECT * FROM uploads WHERE bucket = ? ORDER BY key ASC, upload_id ASC LIMIT ?'),
       countUploads: this.db.prepare('SELECT count(*) AS total FROM uploads WHERE bucket = ?'),
       staleUploads: this.db.prepare('SELECT * FROM uploads WHERE bucket = ? AND initiated_at < ?'),
+      staleUploadsGlobal: this.db.prepare('SELECT * FROM uploads WHERE initiated_at < ?'),
 
       putPart: this.db.prepare(`
         INSERT INTO upload_parts (upload_id, part_number, size, etag, blob_id, uploaded_at)
@@ -402,11 +411,16 @@ export class MetadataStore {
 
   createBucket(name: string, region: string): void {
     this.statements.createBucket.run(name, Date.now(), region)
+    this.bucketCache.delete(name)
   }
 
   getBucket(name: string): BucketRecord | null {
+    const cached = this.bucketCache.get(name)
+    if (cached !== undefined) return cached
     const row = this.statements.getBucket.get(name) as unknown as BucketRow | undefined
-    return row ? { name: row.name, createdAt: new Date(row.created_at), region: row.region } : null
+    const result = row ? { name: row.name, createdAt: new Date(row.created_at), region: row.region } : null
+    this.bucketCache.set(name, result)
+    return result
   }
 
   listBuckets(): BucketRecord[] {
@@ -418,6 +432,8 @@ export class MetadataStore {
     this.statements.deleteAllConfig.run(name)
     this.statements.deleteAllObjects.run(name)
     this.statements.deleteBucket.run(name)
+    this.bucketCache.delete(name)
+    this.configCache.clear()
   }
 
   isBucketEmpty(name: string): boolean {
@@ -429,16 +445,23 @@ export class MetadataStore {
    * expects, because only the caller knows which parser produced the document.
    */
   getConfig<T = Record<string, unknown>>(bucket: string, name: string): T | null {
+    const cacheKey = `${bucket}\x00${name}`
+    const cached = this.configCache.get(cacheKey) as T | null | undefined
+    if (cached !== undefined) return cached as T | null
     const row = this.statements.getConfig.get(bucket, name) as unknown as ConfigRow | undefined
-    return row ? JSON.parse(row.value) as T : null
+    const result = row ? JSON.parse(row.value) as T : null
+    this.configCache.set(cacheKey, result)
+    return result
   }
 
   putConfig(bucket: string, name: string, value: unknown): void {
     this.statements.putConfig.run(bucket, name, JSON.stringify(value))
+    this.configCache.set(`${bucket}\x00${name}`, value)
   }
 
   deleteConfig(bucket: string, name: string): void {
     this.statements.deleteConfig.run(bucket, name)
+    this.configCache.delete(`${bucket}\x00${name}`)
   }
 
   bucketsWithConfig<T = Record<string, unknown>>(name: string): { bucket: string; value: T }[] {
@@ -762,6 +785,35 @@ export class MetadataStore {
     return (this.statements.staleUploads.all(bucket, cutoff) as unknown as UploadRow[])
       .map((row) => this._decodeUpload(row))
       .filter((u): u is UploadRecord => u !== null)
+  }
+
+  allStaleUploads(cutoff: number): UploadRecord[] {
+    return (this.statements.staleUploadsGlobal.all(cutoff) as unknown as UploadRow[])
+      .map((row) => this._decodeUpload(row))
+      .filter((u): u is UploadRecord => u !== null)
+  }
+
+  /**
+   * Returns every blobId referenced anywhere in the metadata store:
+   * objects.blob_id, objects.parts (JSON), and upload_parts.blob_id.
+   * Used by the garbage collector to distinguish live blobs from orphans.
+   */
+  allReferencedBlobIds(): Set<string> {
+    const ids = new Set<string>()
+    for (const row of this.statements.allBlobIds.all() as { blob_id: string }[]) {
+      ids.add(row.blob_id)
+    }
+    for (const row of this.statements.allPartsBlobIds.all() as { parts: string }[]) {
+      try {
+        for (const part of JSON.parse(row.parts) as { blobId: string }[]) {
+          if (part.blobId) ids.add(part.blobId)
+        }
+      } catch { /* skip malformed parts JSON */ }
+    }
+    for (const row of this.statements.allUploadPartBlobIds.all() as { blob_id: string }[]) {
+      ids.add(row.blob_id)
+    }
+    return ids
   }
 
   putPart({ uploadId, partNumber, size, etag, blobId }: {
