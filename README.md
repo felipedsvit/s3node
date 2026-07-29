@@ -83,8 +83,9 @@ Get/ Put/ Delete BucketNotification.
 server-side encryption, `x-amz-checksum-*` headers and trailers (CRC32, CRC32C,
 SHA1, SHA256), and response header overrides for presigned URLs.
 
-**Multipart** — CreateMultipartUpload, UploadPart, CompleteMultipartUpload,
-AbortMultipartUpload, ListParts, ListMultipartUploads.
+**Multipart** — CreateMultipartUpload, UploadPart, UploadPartCopy (with
+`x-amz-copy-source-range`), CompleteMultipartUpload, AbortMultipartUpload,
+ListParts, ListMultipartUploads.
 
 **Auth** — SigV4 in the `Authorization` header and in presigned URLs (query-string
 authentication), across all four payload modes: literal SHA-256, `UNSIGNED-PAYLOAD`,
@@ -103,15 +104,34 @@ DeleteMarkerCreated). Fire-and-forget with configurable timeout.
 non-current version expiration and incomplete multipart upload abortion. Enabled
 via `lifecycleIntervalMs` on server creation.
 
+**Object Lock** — WORM retention in GOVERNANCE and COMPLIANCE modes plus legal
+holds, per object version. Requires a versioned bucket. GOVERNANCE yields to
+`x-amz-bypass-governance-retention`; COMPLIANCE yields to nobody, and a legal
+hold outranks both. Locks apply to destroying a version — writing a delete
+marker over a locked object is still allowed, since that hides the data without
+losing it.
+
+**Cluster mode** — `--cluster [count]` runs one server per core, each binding
+the same port with SO_REUSEPORT so the kernel spreads connections. Metadata
+stays consistent through SQLite's WAL, which lets readers run while one writer
+commits; writes are therefore serialised cluster-wide, so workers scale request
+handling rather than the metadata write rate. Needs Node >= 22.12.
+
+**Console** — `--console-port <port>` serves a dependency-free admin UI for
+browsing buckets and objects, uploading, downloading and deleting. Off unless
+the flag is passed, binds `--host` (loopback by default), and authenticates with
+an s3node credential over HTTP Basic. It speaks plain HTTP — put it behind TLS
+before letting it off the machine.
+
 ### Not implemented
 
 The following return `NotImplemented` rather than silently succeeding — the
 client gets an explicit error instead of believing a setting was applied:
 
 **ACL** (access control lists), **Website** hosting, **Replication**,
-**Object Lock** / WORM compliance, **RequestPayment**, **Analytics**,
-**Inventory**, **Metrics**, **PublicAccessBlock**, **Intelligent-Tiering**,
-**Legal Hold**, **Retention**, **Restore**, **Select**, **Accelerate**.
+**RequestPayment**, **Analytics**, **Inventory**, **Metrics**,
+**PublicAccessBlock**, **Intelligent-Tiering**, **Restore**, **Select**,
+**Accelerate**.
 
 ## Design notes
 

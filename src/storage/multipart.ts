@@ -21,6 +21,8 @@ import type {
   CreateMultipartResult,
   ListPartsOptions,
   PutObjectResult,
+  UploadPartCopyInput,
+  UploadPartCopyResult,
   UploadPartInput,
   UploadPartResult,
 } from './types.js'
@@ -98,6 +100,60 @@ export class MultipartService {
       metadataCommitted = true
       if (previous) await this.ctx.blobs.remove(previous.blobId)
       return { etag, size, encryption: uploadEncryption }
+    } catch (err) {
+      if (!metadataCommitted) await this.ctx.blobs.remove(blobId)
+      throw err
+    }
+  }
+
+  /**
+   * Copies a byte range of an existing object straight into a part blob, so
+   * the bytes never leave the server. The source is decrypted on the way out
+   * and re-encrypted under the destination upload's key, which is why this
+   * cannot be a plain file copy.
+   */
+  async uploadPartCopy(input: UploadPartCopyInput): Promise<UploadPartCopyResult> {
+    const upload = this.requireUpload(input.uploadId, input.bucket, input.key)
+    if (!Number.isInteger(input.partNumber) || input.partNumber < 1 || input.partNumber > MAX_PARTS) {
+      throw new S3Error('InvalidArgument', `Part number must be an integer between 1 and ${MAX_PARTS}`)
+    }
+
+    const source = this.objects.getObject(input.sourceBucket, input.sourceKey, input.sourceVersionId)
+    const range = input.sourceRange ?? { start: 0, end: Math.max(source.size - 1, 0) }
+    if (range.start < 0 || range.start >= Math.max(source.size, 1) || range.end < range.start) {
+      throw new S3Error('InvalidArgument', 'The x-amz-copy-source-range is not satisfiable')
+    }
+
+    const sourceKeyMaterial = this.objects.resolveEncryptionKey(source, input.sourceEncryptionRequest)
+    const plaintext = this.objects.createObjectStream(source, range.start, range.end,
+      { encryptionKey: sourceKeyMaterial })
+
+    const uploadEncryption = upload.encryption
+    let transforms: NodeJS.ReadWriteStream[] = []
+    if (uploadEncryption) {
+      const dataKey = this.ctx.encryption.resolveKey(uploadEncryption, input.encryptionRequest ?? null)
+      transforms = [this.ctx.encryption.createEncryptStream(dataKey!, uploadEncryption, input.partNumber)]
+    }
+
+    const effectiveMax = this.ctx.maxObjectSize > 0 ? this.ctx.maxObjectSize : 0
+    const { blobId, size, hasher } = await this.ctx.blobs.write(plaintext, {
+      algorithms: ['md5'], transforms, maxSize: effectiveMax,
+    })
+
+    let metadataCommitted = false
+    try {
+      const etag = `"${hasher.digest('md5', 'hex')}"`
+      const previous = this.ctx.metadata.getPart(input.uploadId, input.partNumber)
+      this.ctx.metadata.putPart({ uploadId: input.uploadId, partNumber: input.partNumber, size, etag, blobId })
+      metadataCommitted = true
+      if (previous) await this.ctx.blobs.remove(previous.blobId)
+      return {
+        etag,
+        size,
+        lastModified: new Date(),
+        encryption: uploadEncryption,
+        sourceVersionId: source.versionId === NULL_VERSION ? null : source.versionId,
+      }
     } catch (err) {
       if (!metadataCommitted) await this.ctx.blobs.remove(blobId)
       throw err

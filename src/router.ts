@@ -9,9 +9,9 @@ import type { S3NodeServer } from './server.js'
 type HandlerFn = (ctx: RequestContext, res: ServerResponse, deps: { store: ObjectStore; server: S3NodeServer }) => void | Promise<void>
 
 const NOT_IMPLEMENTED_SUBRESOURCES = [
-  'acl', 'website', 'replication', 'encryption', 'object-lock', 'accelerate',
+  'acl', 'website', 'replication', 'encryption', 'accelerate',
   'logging', 'requestPayment', 'analytics', 'inventory', 'metrics', 'publicAccessBlock',
-  'intelligent-tiering', 'ownershipControls', 'legal-hold', 'retention', 'restore', 'select',
+  'intelligent-tiering', 'ownershipControls', 'restore', 'select',
 ]
 
 function rejectUnimplemented(ctx: RequestContext): void {
@@ -48,6 +48,7 @@ function bucketRoute(ctx: RequestContext): Route {
     if (query.has('lifecycle')) return route(handlers.putBucketLifecycle as HandlerFn, 's3:PutLifecycleConfiguration')
     if (query.has('tagging')) return route(handlers.putBucketTagging as HandlerFn, 's3:PutBucketTagging')
     if (query.has('notification')) return route(handlers.putBucketNotification as HandlerFn, 's3:PutBucketNotification')
+    if (query.has('object-lock')) return route(handlers.putBucketObjectLock as HandlerFn, 's3:PutBucketObjectLockConfiguration')
     return route(handlers.createBucket as HandlerFn, 's3:CreateBucket')
   }
 
@@ -74,6 +75,7 @@ function bucketRoute(ctx: RequestContext): Route {
     if (query.has('lifecycle')) return route(handlers.getBucketLifecycle as HandlerFn, 's3:GetLifecycleConfiguration')
     if (query.has('tagging')) return route(handlers.getBucketTagging as HandlerFn, 's3:GetBucketTagging')
     if (query.has('notification')) return route(handlers.getBucketNotification as HandlerFn, 's3:GetBucketNotification')
+    if (query.has('object-lock')) return route(handlers.getBucketObjectLock as HandlerFn, 's3:GetBucketObjectLockConfiguration')
     if (query.has('versions')) return route(handlers.listObjectVersions as HandlerFn, 's3:ListBucketVersions')
     if (query.has('uploads')) return route(handlers.listMultipartUploads as HandlerFn, 's3:ListBucketMultipartUploads')
     return query.get('list-type') === '2'
@@ -90,7 +92,15 @@ function objectRoute(ctx: RequestContext): Route {
 
   if (method === 'PUT') {
     if (query.has('tagging')) return route(handlers.putObjectTagging as HandlerFn, 's3:PutObjectTagging')
-    if (uploadId && query.has('partNumber')) return route(handlers.uploadPart as HandlerFn, 's3:PutObject')
+    if (query.has('retention')) return route(handlers.putObjectRetention as HandlerFn, 's3:PutObjectRetention')
+    if (query.has('legal-hold')) return route(handlers.putObjectLegalHold as HandlerFn, 's3:PutObjectLegalHold')
+    if (uploadId && query.has('partNumber')) {
+      // UploadPartCopy is UploadPart plus a copy source; the source object is
+      // read server-side, so the caller also needs GetObject on it.
+      return headers['x-amz-copy-source']
+        ? route(handlers.uploadPartCopy as HandlerFn, 's3:PutObject')
+        : route(handlers.uploadPart as HandlerFn, 's3:PutObject')
+    }
     if (headers['x-amz-copy-source']) return route(handlers.copyObject as HandlerFn, 's3:PutObject')
     return route(handlers.putObject as HandlerFn, 's3:PutObject')
   }
@@ -103,6 +113,8 @@ function objectRoute(ctx: RequestContext): Route {
 
   if (method === 'GET') {
     if (query.has('tagging')) return route(handlers.getObjectTagging as HandlerFn, 's3:GetObjectTagging')
+    if (query.has('retention')) return route(handlers.getObjectRetention as HandlerFn, 's3:GetObjectRetention')
+    if (query.has('legal-hold')) return route(handlers.getObjectLegalHold as HandlerFn, 's3:GetObjectLegalHold')
     if (uploadId) return route(handlers.listParts as HandlerFn, 's3:ListMultipartUploadParts')
     return route(handlers.getObject as HandlerFn, 's3:GetObject')
   }

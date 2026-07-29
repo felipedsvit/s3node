@@ -588,7 +588,7 @@ describe('error surface', () => {
   })
 
   it('reports NotImplemented for out-of-scope subresources', async () => {
-    for (const subresource of ['acl', 'replication', 'website', 'object-lock']) {
+    for (const subresource of ['acl', 'replication', 'website', 'restore']) {
       const response = await client.request({
         method: 'GET', bucket: BUCKET, query: { [subresource]: '' },
       })

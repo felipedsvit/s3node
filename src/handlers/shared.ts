@@ -62,6 +62,34 @@ export function integrityOptions(ctx: RequestContext): {
   }
 }
 
+export interface CopySource {
+  bucket: string
+  key: string
+  versionId: string | null
+}
+
+/**
+ * Parses `x-amz-copy-source`, which carries `bucket/key` with an optional
+ * leading slash and an optional `?versionId=`. Shared by CopyObject and
+ * UploadPartCopy so the two cannot disagree on the encoding rules.
+ */
+export function parseCopySource(header: string | string[] | undefined): CopySource {
+  const [pathPart, queryPart] = String(header ?? '').split('?')
+  const normalized = (pathPart ?? '').startsWith('/') ? pathPart!.slice(1) : (pathPart ?? '')
+  const slash = normalized.indexOf('/')
+  if (slash === -1) throw new S3Error('InvalidArgument', 'Invalid x-amz-copy-source')
+
+  try {
+    return {
+      bucket: decodeURIComponent(normalized.slice(0, slash)),
+      key: decodeURIComponent(normalized.slice(slash + 1)),
+      versionId: queryPart ? new URLSearchParams(queryPart).get('versionId') : null,
+    }
+  } catch {
+    throw new S3Error('InvalidArgument', 'Invalid x-amz-copy-source encoding')
+  }
+}
+
 export function checksumHeaders(checksums: Record<string, string>): Record<string, string> {
   const headers: Record<string, string> = {}
   for (const [algorithm, value] of Object.entries(checksums ?? {})) {

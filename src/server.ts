@@ -31,6 +31,12 @@ import type { ObjectRecord } from './storage/metadata.js'
 
 const DEFAULT_REGION = 'us-east-1'
 
+/** Node grew SO_REUSEPORT support for listeners in 22.12. */
+export function supportsReusePort(): boolean {
+  const [major, minor] = process.versions.node.split('.').map(Number)
+  return major! > 22 || (major === 22 && minor! >= 12)
+}
+
 interface ServerEvent {
   bucket: string
   eventName: string
@@ -280,10 +286,20 @@ export class S3NodeServer {
     ctx.bodyStreams = [ctx.req, decoder]
   }
 
-  listen(port = 0, host = '127.0.0.1'): Promise<ReturnType<typeof this.address>> {
+  /**
+   * `reusePort` lets several processes bind the same port and have the kernel
+   * spread connections between them, which is how cluster mode scales without a
+   * primary relaying every socket. It needs Node >= 22.12; callers that ask for
+   * it on an older runtime get a clear error rather than a silent single-worker
+   * fallback.
+   */
+  listen(port = 0, host = '127.0.0.1', { reusePort = false } = {}): Promise<ReturnType<typeof this.address>> {
+    if (reusePort && !supportsReusePort()) {
+      throw new Error('reusePort requires Node.js 22.12 or newer')
+    }
     return new Promise((resolve, reject) => {
       this.http.once('error', reject)
-      this.http.listen(port, host, () => {
+      this.http.listen({ port, host, ...(reusePort ? { reusePort: true } : {}) }, () => {
         this.http.removeListener('error', reject)
         resolve(this.address())
       })

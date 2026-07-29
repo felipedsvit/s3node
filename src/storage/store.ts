@@ -2,6 +2,7 @@ import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Readable } from 'node:stream'
 import { EncryptionManager, type SseRequest } from '../features/encryption.js'
+import type { LockState, Retention } from '../features/objectlock.js'
 import { CHECKSUM_ALGORITHMS } from '../util/hash.js'
 import { BlobStore, READ_HIGH_WATER_MARK } from './blobs.js'
 import { BucketService } from './buckets.js'
@@ -27,6 +28,8 @@ import type {
   ListVersionsOptions,
   PutObjectInput,
   PutObjectResult,
+  UploadPartCopyInput,
+  UploadPartCopyResult,
   UploadPartInput,
   UploadPartResult,
 } from './types.js'
@@ -129,8 +132,17 @@ export class ObjectStore {
     return this.objects.getObject(bucket, key, versionId)
   }
   copyObject(input: CopyObjectInput): Promise<CopyObjectResult> { return this.objects.copyObject(input) }
-  deleteObject(bucket: string, key: string, versionId?: string | null): Promise<DeleteObjectResult> {
-    return this.objects.deleteObject(bucket, key, versionId)
+  deleteObject(bucket: string, key: string, versionId?: string | null, options?: { bypassGovernance?: boolean }): Promise<DeleteObjectResult> {
+    return this.objects.deleteObject(bucket, key, versionId, options)
+  }
+  getObjectLock(bucket: string, key: string, versionId?: string | null): LockState {
+    return this.objects.getObjectLock(bucket, key, versionId)
+  }
+  setRetention(bucket: string, key: string, versionId: string | null | undefined, retention: Retention, options?: { bypassGovernance?: boolean }): string {
+    return this.objects.setRetention(bucket, key, versionId, retention, options)
+  }
+  setLegalHold(bucket: string, key: string, versionId: string | null | undefined, held: boolean): string {
+    return this.objects.setLegalHold(bucket, key, versionId, held)
   }
   resolveEncryptionKey(record: ObjectRecord, encryptionRequest: SseRequest | null | undefined): Buffer | null {
     return this.objects.resolveEncryptionKey(record, encryptionRequest)
@@ -159,6 +171,9 @@ export class ObjectStore {
     return this.multipart.requireUpload(uploadId, bucket, key)
   }
   uploadPart(input: UploadPartInput): Promise<UploadPartResult> { return this.multipart.uploadPart(input) }
+  uploadPartCopy(input: UploadPartCopyInput): Promise<UploadPartCopyResult> {
+    return this.multipart.uploadPartCopy(input)
+  }
   listParts(bucket: string, key: string, uploadId: string, options: ListPartsOptions): PartRecord[] {
     return this.multipart.listParts(bucket, key, uploadId, options)
   }

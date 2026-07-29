@@ -2,6 +2,14 @@ import type { ServerResponse } from 'node:http'
 import { pipeline } from 'node:stream/promises'
 import { S3Error } from '../errors.js'
 import { EncryptionContext, encryptionResponseHeaders } from '../features/encryption.js'
+import {
+  legalHoldXml,
+  lockFromHeaders,
+  lockResponseHeaders,
+  parseLegalHoldXml,
+  parseRetentionXml,
+  retentionXml,
+} from '../features/objectlock.js'
 import { parseTaggingHeader, parseTaggingXml, taggingXml } from '../features/tagging.js'
 import {
   baseHeaders,
@@ -16,7 +24,7 @@ import {
   type RequestContext,
 } from '../http.js'
 import { document, text } from '../xml.js'
-import { checksumHeaders, integrityOptions, notify, sseRequest, versionHeaders } from './shared.js'
+import { checksumHeaders, integrityOptions, notify, parseCopySource, sseRequest, versionHeaders } from './shared.js'
 import type { S3NodeServer } from '../server.js'
 import type { ObjectStore } from '../storage/store.js'
 
@@ -34,6 +42,7 @@ export async function putObject(ctx: RequestContext, res: ServerResponse, { stor
     metadata: userMetadata(ctx.headers as Record<string, string | string[] | undefined>),
     tags: parseTaggingHeader(ctx.headers['x-amz-tagging'] as string | undefined),
     encryptionRequest: sseRequest(ctx, store),
+    lock: lockFromHeaders(ctx.headers as Record<string, string | string[] | undefined>),
     ...integrityOptions(ctx),
   })
 
@@ -51,23 +60,8 @@ export async function putObject(ctx: RequestContext, res: ServerResponse, { stor
 }
 
 export async function copyObject(ctx: RequestContext, res: ServerResponse, { store, server }: { store: ObjectStore; server: S3NodeServer }): Promise<void> {
-  const raw = String(ctx.headers['x-amz-copy-source'])
-  const [pathPart, queryPart] = raw.split('?')
-  const normalized = (pathPart ?? '').startsWith('/') ? pathPart!.slice(1) : pathPart
-  const slash = normalized!.indexOf('/')
-  if (slash === -1) throw new S3Error('InvalidArgument', 'Invalid x-amz-copy-source')
-
-  let sourceBucket: string
-  let sourceKey: string
-  try {
-    sourceBucket = decodeURIComponent(normalized!.slice(0, slash))
-    sourceKey = decodeURIComponent(normalized!.slice(slash + 1))
-  } catch {
-    throw new S3Error('InvalidArgument', 'Invalid x-amz-copy-source encoding')
-  }
-  const sourceVersionId = queryPart
-    ? new URLSearchParams(queryPart).get('versionId')
-    : null
+  const { bucket: sourceBucket, key: sourceKey, versionId: sourceVersionId } =
+    parseCopySource(ctx.headers['x-amz-copy-source'])
 
   const metadataDirective = String(ctx.headers['x-amz-metadata-directive'] ?? 'COPY').toUpperCase()
   const taggingDirective = String(ctx.headers['x-amz-tagging-directive'] ?? 'COPY').toUpperCase()
@@ -111,6 +105,9 @@ interface DescribableObject {
   versionId?: string
   tags?: Record<string, string>
   metadata?: Record<string, string>
+  retentionMode?: string | null
+  retainUntil?: Date | null
+  legalHold?: boolean
 }
 
 function objectResponseHeaders(ctx: RequestContext, record: DescribableObject): Record<string, string | number> {
@@ -122,6 +119,11 @@ function objectResponseHeaders(ctx: RequestContext, record: DescribableObject): 
     'Accept-Ranges': 'bytes',
     ...checksumHeaders(record.checksums ?? {}),
     ...encryptionResponseHeaders(record.encryption),
+    ...lockResponseHeaders({
+      retentionMode: record.retentionMode ?? null,
+      retainUntil: record.retainUntil ?? null,
+      legalHold: record.legalHold ?? false,
+    }),
   }
   if (record.versionId && record.versionId !== 'null') headers['x-amz-version-id'] = record.versionId
   if (Object.keys(record.tags ?? {}).length) {
@@ -187,7 +189,8 @@ export function headObject(ctx: RequestContext, res: ServerResponse, { store }: 
 }
 
 export async function deleteObject(ctx: RequestContext, res: ServerResponse, { store, server }: { store: ObjectStore; server: S3NodeServer }): Promise<void> {
-  const result = await store.deleteObject(ctx.bucket, ctx.key, requestedVersionId(ctx))
+  const result = await store.deleteObject(ctx.bucket, ctx.key, requestedVersionId(ctx),
+    { bypassGovernance: bypassGovernance(ctx) })
 
   if (result.deleted) {
     notify(server, {
@@ -218,4 +221,31 @@ export async function putObjectTagging(ctx: RequestContext, res: ServerResponse,
 export function deleteObjectTagging(ctx: RequestContext, res: ServerResponse, { store }: { store: ObjectStore }): void {
   const versionId = store.setObjectTags(ctx.bucket, ctx.key, requestedVersionId(ctx), {})
   sendEmpty(ctx, res, 204, versionId !== 'null' ? { 'x-amz-version-id': versionId } : {})
+}
+
+function bypassGovernance(ctx: RequestContext): boolean {
+  return String(ctx.headers['x-amz-bypass-governance-retention'] ?? '').toLowerCase() === 'true'
+}
+
+export function getObjectRetention(ctx: RequestContext, res: ServerResponse, { store }: { store: ObjectStore }): void {
+  const lock = store.getObjectLock(ctx.bucket, ctx.key, requestedVersionId(ctx))
+  sendXml(ctx, res, 200, retentionXml(lock))
+}
+
+export async function putObjectRetention(ctx: RequestContext, res: ServerResponse, { store }: { store: ObjectStore }): Promise<void> {
+  const retention = parseRetentionXml(await collectBody(ctx.bodyStreams))
+  const versionId = store.setRetention(ctx.bucket, ctx.key, requestedVersionId(ctx), retention,
+    { bypassGovernance: bypassGovernance(ctx) })
+  sendEmpty(ctx, res, 200, versionId !== 'null' ? { 'x-amz-version-id': versionId } : {})
+}
+
+export function getObjectLegalHold(ctx: RequestContext, res: ServerResponse, { store }: { store: ObjectStore }): void {
+  const lock = store.getObjectLock(ctx.bucket, ctx.key, requestedVersionId(ctx))
+  sendXml(ctx, res, 200, legalHoldXml(lock.legalHold))
+}
+
+export async function putObjectLegalHold(ctx: RequestContext, res: ServerResponse, { store }: { store: ObjectStore }): Promise<void> {
+  const held = parseLegalHoldXml(await collectBody(ctx.bodyStreams))
+  const versionId = store.setLegalHold(ctx.bucket, ctx.key, requestedVersionId(ctx), held)
+  sendEmpty(ctx, res, 200, versionId !== 'null' ? { 'x-amz-version-id': versionId } : {})
 }

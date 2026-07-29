@@ -3,7 +3,7 @@ import type { EncryptionContext } from '../features/encryption.js'
 import { keySuccessor, prefixUpperBound, toKeyBuffer } from '../util/bytes.js'
 import type { BlobPart } from './blobs.js'
 
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 export const NULL_VERSION = 'null'
 
 const SCHEMA = `
@@ -37,6 +37,9 @@ CREATE TABLE IF NOT EXISTS objects (
   checksums        TEXT,
   tags             TEXT,
   encryption       TEXT,
+  retention_mode   TEXT,
+  retain_until     INTEGER,
+  legal_hold       INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (bucket, key, version_id)
 ) WITHOUT ROWID;
 
@@ -86,6 +89,10 @@ export interface ObjectRecord {
   checksums: Record<string, string>
   tags: Record<string, string>
   encryption: EncryptionContext | null
+  /** Object Lock: retention mode, its expiry, and the independent legal hold. */
+  retentionMode: string | null
+  retainUntil: Date | null
+  legalHold: boolean
 }
 
 export interface BucketRecord {
@@ -130,6 +137,9 @@ interface RawRow {
   checksums: string | null
   tags: string | null
   encryption: string | null
+  retention_mode: string | null
+  retain_until: number | null
+  legal_hold: number
 }
 
 function decodeRow(row: RawRow | undefined): ObjectRecord | null {
@@ -151,7 +161,19 @@ function decodeRow(row: RawRow | undefined): ObjectRecord | null {
     checksums: row.checksums ? JSON.parse(row.checksums) : {},
     tags: row.tags ? JSON.parse(row.tags) : {},
     encryption: row.encryption ? JSON.parse(row.encryption) : null,
+    retentionMode: (row.retention_mode as string | null) ?? null,
+    retainUntil: row.retain_until == null ? null : new Date(Number(row.retain_until)),
+    legalHold: Boolean(row.legal_hold),
   }
+}
+
+/** Object Lock columns arrived in v3; they are nullable, so ALTER is enough. */
+function migrateV2ToV3(db: DatabaseSync): void {
+  const columns = db.prepare('PRAGMA table_info(objects)').all().map((c: Record<string, unknown>) => c.name)
+  if (columns.length === 0 || columns.includes('retention_mode')) return
+  db.exec('ALTER TABLE objects ADD COLUMN retention_mode TEXT')
+  db.exec('ALTER TABLE objects ADD COLUMN retain_until INTEGER')
+  db.exec('ALTER TABLE objects ADD COLUMN legal_hold INTEGER NOT NULL DEFAULT 0')
 }
 
 function migrateV1ToV2(db: DatabaseSync): void {
@@ -185,6 +207,9 @@ export interface ObjectInput {
   checksums?: Record<string, string>
   tags?: Record<string, string>
   encryption?: EncryptionContext | null
+  retentionMode?: string | null
+  retainUntil?: Date | null
+  legalHold?: boolean
 }
 
 interface ConfigRow {
@@ -253,6 +278,7 @@ export class MetadataStore {
 
     migrateV1ToV2(this.db)
     this.db.exec(SCHEMA)
+    migrateV2ToV3(this.db)
     this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
 
     this.statements = {
@@ -273,15 +299,21 @@ export class MetadataStore {
       putObject: this.db.prepare(`
         INSERT INTO objects (bucket, key, version_id, sequence, is_latest, is_delete_marker,
                              size, etag, content_type, last_modified, blob_id, parts,
-                             metadata, checksums, tags, encryption)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             metadata, checksums, tags, encryption,
+                             retention_mode, retain_until, legal_hold)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (bucket, key, version_id) DO UPDATE SET
           sequence = excluded.sequence, is_latest = excluded.is_latest,
           is_delete_marker = excluded.is_delete_marker, size = excluded.size,
           etag = excluded.etag, content_type = excluded.content_type,
           last_modified = excluded.last_modified, blob_id = excluded.blob_id,
           parts = excluded.parts, metadata = excluded.metadata,
-          checksums = excluded.checksums, tags = excluded.tags, encryption = excluded.encryption`),
+          checksums = excluded.checksums, tags = excluded.tags, encryption = excluded.encryption,
+          retention_mode = excluded.retention_mode, retain_until = excluded.retain_until,
+          legal_hold = excluded.legal_hold`),
+      updateLock: this.db.prepare(
+        'UPDATE objects SET retention_mode = ?, retain_until = ?, legal_hold = ? ' +
+        ' WHERE bucket = ? AND key = ? AND version_id = ?'),
       getVersion: this.db.prepare('SELECT * FROM objects WHERE bucket = ? AND key = ? AND version_id = ?'),
       getLatest: this.db.prepare(
         'SELECT * FROM objects WHERE bucket = ? AND key = ? AND is_latest = 1'),
@@ -432,6 +464,25 @@ export class MetadataStore {
       record.checksums && Object.keys(record.checksums).length ? JSON.stringify(record.checksums) : null,
       record.tags && Object.keys(record.tags).length ? JSON.stringify(record.tags) : null,
       record.encryption ? JSON.stringify(record.encryption) : null,
+      record.retentionMode ?? null,
+      record.retainUntil ? record.retainUntil.getTime() : null,
+      record.legalHold ? 1 : 0,
+    )
+  }
+
+  /** Replaces the Object Lock state of one specific version. */
+  setLock(bucket: string, key: string, versionId: string, lock: {
+    retentionMode?: string | null
+    retainUntil?: Date | null
+    legalHold?: boolean
+  }): void {
+    this.statements.updateLock.run(
+      lock.retentionMode ?? null,
+      lock.retainUntil ? lock.retainUntil.getTime() : null,
+      lock.legalHold ? 1 : 0,
+      bucket,
+      toKeyBuffer(key),
+      versionId,
     )
   }
 

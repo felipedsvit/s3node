@@ -7,6 +7,8 @@ import { lifecycleXml, parseLifecycleXml } from '../features/lifecycle.js'
 import type { LifecycleConfig } from '../features/lifecycle.js'
 import { notificationXml, parseNotificationXml } from '../features/notifications.js'
 import type { NotificationConfig } from '../features/notifications.js'
+import { objectLockConfigXml, parseObjectLockConfigXml } from '../features/objectlock.js'
+import type { ObjectLockConfig } from '../features/objectlock.js'
 import { parsePolicy } from '../features/policy.js'
 import { MAX_BUCKET_TAGS, parseTaggingXml, taggingXml } from '../features/tagging.js'
 import { childText, document, parseXml, text } from '../xml.js'
@@ -118,5 +120,23 @@ export async function putBucketNotification(ctx: RequestContext, res: ServerResp
   } else {
     store.putBucketConfig(ctx.bucket, 'notification', config)
   }
+  sendEmpty(ctx, res, 200)
+}
+
+export function getBucketObjectLock(ctx: RequestContext, res: ServerResponse, { store }: { store: ObjectStore }): void {
+  const config = store.getBucketConfig<ObjectLockConfig>(ctx.bucket, 'object-lock')
+  if (!config?.enabled) throw new S3Error('NoSuchObjectLockConfiguration')
+  sendXml(ctx, res, 200, objectLockConfigXml(config))
+}
+
+export async function putBucketObjectLock(ctx: RequestContext, res: ServerResponse, { store }: { store: ObjectStore }): Promise<void> {
+  store.requireBucket(ctx.bucket)
+  // Object Lock needs immutable versions to attach to; without versioning a
+  // plain overwrite would replace the very bytes the lock is meant to preserve.
+  if (store.bucketVersioning(ctx.bucket) !== 'Enabled') {
+    throw new S3Error('InvalidBucketState', 'Object Lock requires versioning to be enabled')
+  }
+  const config = parseObjectLockConfigXml(await collectBody(ctx.bodyStreams))
+  store.putBucketConfig(ctx.bucket, 'object-lock', config)
   sendEmpty(ctx, res, 200)
 }

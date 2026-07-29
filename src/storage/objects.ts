@@ -1,6 +1,14 @@
 import { Readable } from 'node:stream'
 import { S3Error } from '../errors.js'
 import { blockAlignedOffset, type EncryptionContext, type SseRequest } from '../features/encryption.js'
+import {
+  applyDefaultRetention,
+  assertRetentionReplaceable,
+  assertVersionDeletable,
+  type LockState,
+  type ObjectLockConfig,
+  type Retention,
+} from '../features/objectlock.js'
 import { READ_HIGH_WATER_MARK } from './blobs.js'
 import type { BucketService } from './buckets.js'
 import {
@@ -80,6 +88,7 @@ export class ObjectService {
       const replaced = versionId === NULL_VERSION
         ? this.ctx.metadata.getObject(input.bucket, input.key, NULL_VERSION)
         : null
+      const lock = this.resolveNewObjectLock(input.bucket, input.lock)
 
       this.ctx.metadata.transaction(() => {
         this.ctx.metadata.clearLatest(input.bucket, input.key)
@@ -87,7 +96,7 @@ export class ObjectService {
           bucket: input.bucket, key: input.key, versionId, isLatest: true, isDeleteMarker: false,
           size, etag, contentType: input.contentType, lastModified,
           blobId, parts: null, metadata: input.metadata ?? {}, checksums, tags: input.tags ?? {},
-          encryption,
+          encryption, ...lock,
         })
       })
       metadataCommitted = true
@@ -166,13 +175,17 @@ export class ObjectService {
     return Readable.from(generate(), { highWaterMark: READ_HIGH_WATER_MARK })
   }
 
-  async deleteObject(bucket: string, key: string, versionId?: string | null): Promise<DeleteObjectResult> {
+  async deleteObject(bucket: string, key: string, versionId?: string | null, { bypassGovernance = false } = {}): Promise<DeleteObjectResult> {
     this.buckets.requireBucket(bucket)
     const versioning = this.buckets.bucketVersioning(bucket)
 
     if (versionId) {
       const record = this.ctx.metadata.getObject(bucket, key, versionId)
       if (!record) return { deleted: false }
+      // Object Lock only ever protects a concrete version. Deleting the "current"
+      // object in a versioned bucket just writes a delete marker, which hides the
+      // data without destroying it, so that path stays open.
+      assertVersionDeletable(record, { bypassGovernance })
       this.ctx.metadata.transaction(() => {
         this.ctx.metadata.deleteVersion(bucket, key, versionId)
         if (record.isLatest) this.ctx.metadata.promoteLatest(bucket, key)
@@ -199,6 +212,9 @@ export class ObjectService {
 
     const record = this.ctx.metadata.getObject(bucket, key)
     if (!record) return { deleted: false }
+    // Without versioning a plain DELETE destroys the only copy, so the lock
+    // applies here exactly as it does to an explicit version delete.
+    assertVersionDeletable(record, { bypassGovernance })
     this.ctx.metadata.deleteVersion(bucket, key, record.versionId)
     await this.releaseObjectBlobs(record)
     return { deleted: true }
@@ -274,6 +290,53 @@ export class ObjectService {
     const record = this.getObject(bucket, key, versionId)
     this.ctx.metadata.setTags(bucket, key, record.versionId, tags)
     return record.versionId
+  }
+
+  /** Merges explicit lock headers over the bucket's default retention. */
+  private resolveNewObjectLock(bucket: string, requested?: Partial<LockState> | null): Partial<LockState> {
+    const config = this.buckets.getBucketConfig<ObjectLockConfig>(bucket, 'object-lock')
+    const defaults = applyDefaultRetention(config)
+    return { ...defaults, ...(requested ?? {}) }
+  }
+
+  getObjectLock(bucket: string, key: string, versionId?: string | null): LockState {
+    const record = this.getObject(bucket, key, versionId)
+    return {
+      retentionMode: record.retentionMode,
+      retainUntil: record.retainUntil,
+      legalHold: record.legalHold,
+    }
+  }
+
+  /** Sets retention on one version, refusing to weaken an active COMPLIANCE lock. */
+  setRetention(bucket: string, key: string, versionId: string | null | undefined, retention: Retention, { bypassGovernance = false } = {}): string {
+    this.requireLockEnabled(bucket)
+    const record = this.getObject(bucket, key, versionId)
+    assertRetentionReplaceable(record, retention, { bypassGovernance })
+    this.ctx.metadata.setLock(bucket, key, record.versionId, {
+      retentionMode: retention.mode,
+      retainUntil: retention.retainUntil,
+      legalHold: record.legalHold,
+    })
+    return record.versionId
+  }
+
+  setLegalHold(bucket: string, key: string, versionId: string | null | undefined, held: boolean): string {
+    this.requireLockEnabled(bucket)
+    const record = this.getObject(bucket, key, versionId)
+    this.ctx.metadata.setLock(bucket, key, record.versionId, {
+      retentionMode: record.retentionMode,
+      retainUntil: record.retainUntil,
+      legalHold: held,
+    })
+    return record.versionId
+  }
+
+  private requireLockEnabled(bucket: string): void {
+    const config = this.buckets.getBucketConfig<ObjectLockConfig>(bucket, 'object-lock')
+    if (!config?.enabled) {
+      throw new S3Error('InvalidRequest', 'Object Lock is not enabled for this bucket')
+    }
   }
 
   /** Drops every blob a record owns, whether it is single-blob or multipart. */

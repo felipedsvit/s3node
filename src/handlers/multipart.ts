@@ -5,7 +5,8 @@ import { parseTaggingHeader } from '../features/tagging.js'
 import { collectBody, isoDate, sendEmpty, sendXml, userMetadata, type RequestContext } from '../http.js'
 import { childText, childrenNamed, document, parseXml, text } from '../xml.js'
 import {
-  checksumHeaders, integerParam, integrityOptions, notify, ownerXml, sseRequest, versionHeaders,
+  checksumHeaders, integerParam, integrityOptions, notify, ownerXml, parseCopySource, sseRequest,
+  versionHeaders,
 } from './shared.js'
 import type { ObjectStore } from '../storage/store.js'
 import type { S3NodeServer } from '../server.js'
@@ -36,6 +37,43 @@ export async function uploadPart(ctx: RequestContext, res: ServerResponse, { sto
     ...integrityOptions(ctx),
   })
   sendEmpty(ctx, res, 200, { ETag: result.etag, ...encryptionResponseHeaders(result.encryption) })
+}
+
+/**
+ * `x-amz-copy-source-range` uses the same `bytes=first-last` syntax as Range,
+ * but S3 does not accept the suffix or open-ended forms here, so both bounds
+ * are required.
+ */
+function parseCopySourceRange(header: string | string[] | undefined): { start: number; end: number } | null {
+  if (header === undefined) return null
+  const match = /^bytes=(\d+)-(\d+)$/.exec(String(header).trim())
+  if (!match) {
+    throw new S3Error('InvalidArgument', 'x-amz-copy-source-range must be of the form bytes=first-last')
+  }
+  return { start: Number.parseInt(match[1]!, 10), end: Number.parseInt(match[2]!, 10) }
+}
+
+export async function uploadPartCopy(ctx: RequestContext, res: ServerResponse, { store }: { store: ObjectStore }): Promise<void> {
+  const source = parseCopySource(ctx.headers['x-amz-copy-source'])
+  const result = await store.uploadPartCopy({
+    bucket: ctx.bucket,
+    key: ctx.key,
+    uploadId: ctx.query.get('uploadId')!,
+    partNumber: Number.parseInt(ctx.query.get('partNumber')!, 10),
+    sourceBucket: source.bucket,
+    sourceKey: source.key,
+    sourceVersionId: source.versionId,
+    sourceRange: parseCopySourceRange(ctx.headers['x-amz-copy-source-range']),
+    sourceEncryptionRequest: sseRequest(ctx, store, { copySource: true }),
+    encryptionRequest: sseRequest(ctx, store),
+  })
+
+  sendXml(ctx, res, 200, document('CopyPartResult',
+    text('LastModified', isoDate(result.lastModified)) + text('ETag', result.etag)),
+  {
+    ...encryptionResponseHeaders(result.encryption),
+    ...(result.sourceVersionId ? { 'x-amz-copy-source-version-id': result.sourceVersionId } : {}),
+  })
 }
 
 export async function completeMultipartUpload(ctx: RequestContext, res: ServerResponse, { store, server }: { store: ObjectStore; server: S3NodeServer }): Promise<void> {

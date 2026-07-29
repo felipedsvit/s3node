@@ -26,6 +26,8 @@ const CODES: Record<string, [number, string]> = {
   NoSuchBucketPolicy: [404, 'The bucket policy does not exist'],
   NoSuchCORSConfiguration: [404, 'The CORS configuration does not exist'],
   NoSuchLifecycleConfiguration: [404, 'The lifecycle configuration does not exist'],
+  NoSuchObjectLockConfiguration: [404, 'The object lock configuration does not exist'],
+  InvalidBucketState: [409, 'The request is not valid for the current state of the bucket'],
   NoSuchTagSet: [404, 'The TagSet does not exist'],
   NoSuchVersion: [404, 'The specified version does not exist'],
   KeyTooLongError: [400, 'Your key is too long'],

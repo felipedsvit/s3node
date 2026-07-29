@@ -1,4 +1,4 @@
-export { S3NodeServer } from './server.js'
+export { S3NodeServer, supportsReusePort } from './server.js'
 export type { ServerOptions, CreateOptions } from './server.js'
 export { CredentialStore, generateCredential } from './auth/credentials.js'
 export type { Credential } from './auth/credentials.js'
@@ -21,14 +21,19 @@ export { evaluatePolicy, parsePolicy } from './features/policy.js'
 export { runLifecycle } from './features/lifecycle.js'
 export { NotificationDispatcher, buildEvent } from './features/notifications.js'
 export type { NotificationConfig } from './features/notifications.js'
+export { ConsoleServer } from './console/server.js'
+export type { ConsoleOptions } from './console/server.js'
+export { runCluster, clusterSupported, defaultWorkerCount } from './cluster.js'
+export type { ClusterOptions } from './cluster.js'
 export * as sigv4 from './auth/sigv4.js'
 
 import { S3NodeServer } from './server.js'
 import type { CreateOptions } from './server.js'
 
-export async function createServer(options: CreateOptions = {} as CreateOptions): Promise<S3NodeServer> {
+export async function createServer(options: CreateOptions & { reusePort?: boolean } = {} as CreateOptions): Promise<S3NodeServer> {
   const server = await S3NodeServer.create(options)
-  const address = await server.listen(options.port ?? 0, options.host ?? '127.0.0.1')
+  const address = await server.listen(options.port ?? 0, options.host ?? '127.0.0.1',
+    { reusePort: options.reusePort ?? false })
   server.endpoint = address!.endpoint
   return server
 }

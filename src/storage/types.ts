@@ -1,6 +1,7 @@
 /** Input and result shapes exchanged across the storage service boundary. */
 
 import type { EncryptionContext, SseRequest } from '../features/encryption.js'
+import type { LockState } from '../features/objectlock.js'
 
 export interface PutObjectInput {
   bucket: string
@@ -15,6 +16,8 @@ export interface PutObjectInput {
   expectedChecksum?: string | null
   trailerProvider?: ((name: string) => string | null) | null
   encryptionRequest?: SseRequest | null
+  /** Object Lock state requested via headers; merged over the bucket default. */
+  lock?: Partial<LockState> | null
 }
 
 export interface PutObjectResult {
@@ -89,6 +92,28 @@ export interface UploadPartResult {
   etag: string
   size: number
   encryption: EncryptionContext | null
+}
+
+export interface UploadPartCopyInput {
+  bucket: string
+  key: string
+  uploadId: string
+  partNumber: number
+  sourceBucket: string
+  sourceKey: string
+  sourceVersionId?: string | null
+  /** Byte range of the source object to copy; the whole object when absent. */
+  sourceRange?: { start: number; end: number } | null
+  sourceEncryptionRequest?: SseRequest | null
+  encryptionRequest?: SseRequest | null
+}
+
+export interface UploadPartCopyResult {
+  etag: string
+  size: number
+  lastModified: Date
+  encryption: EncryptionContext | null
+  sourceVersionId: string | null
 }
 
 export interface CompleteMultipartInput {

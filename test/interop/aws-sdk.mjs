@@ -20,7 +20,11 @@ import {
   S3Client, CreateBucketCommand, DeleteBucketCommand, ListBucketsCommand,
   PutObjectCommand, GetObjectCommand, HeadObjectCommand,
   DeleteObjectsCommand, ListObjectsV2Command, ListObjectsCommand, CopyObjectCommand,
-  HeadBucketCommand,
+  HeadBucketCommand, CreateMultipartUploadCommand, UploadPartCopyCommand,
+  CompleteMultipartUploadCommand, PutBucketVersioningCommand,
+  PutObjectLockConfigurationCommand, GetObjectLockConfigurationCommand,
+  PutObjectRetentionCommand, GetObjectRetentionCommand,
+  PutObjectLegalHoldCommand, GetObjectLegalHoldCommand, DeleteObjectCommand,
 } from '@aws-sdk/client-s3'
 import { Upload } from '@aws-sdk/lib-storage'
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
@@ -236,6 +240,81 @@ await check('NoSuchBucket is surfaced as a typed SDK error', async () => {
   } catch (err) {
     assert(err.name === 'NoSuchBucket', `expected NoSuchBucket, got ${err.name}`)
   }
+})
+
+await check('UploadPartCopy assembles an object from ranges of another', async () => {
+  const source = randomBytes(12 * 1024 * 1024)
+  await s3.send(new PutObjectCommand({ Bucket: BUCKET, Key: 'copy-source.bin', Body: source }))
+
+  const created = await s3.send(new CreateMultipartUploadCommand({ Bucket: BUCKET, Key: 'copy-target.bin' }))
+  const ranges = [[0, 6 * 1024 * 1024 - 1], [6 * 1024 * 1024, source.length - 1]]
+  const parts = []
+  for (const [index, [first, last]] of ranges.entries()) {
+    const copied = await s3.send(new UploadPartCopyCommand({
+      Bucket: BUCKET, Key: 'copy-target.bin',
+      UploadId: created.UploadId, PartNumber: index + 1,
+      CopySource: `${BUCKET}/copy-source.bin`,
+      CopySourceRange: `bytes=${first}-${last}`,
+    }))
+    parts.push({ PartNumber: index + 1, ETag: copied.CopyPartResult.ETag })
+  }
+  await s3.send(new CompleteMultipartUploadCommand({
+    Bucket: BUCKET, Key: 'copy-target.bin',
+    UploadId: created.UploadId, MultipartUpload: { Parts: parts },
+  }))
+
+  const got = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: 'copy-target.bin' }))
+  const bytes = Buffer.from(await got.Body.transformToByteArray())
+  assert(bytes.equals(source), 'copied object differs from its source')
+})
+
+await check('Object Lock retention and legal hold', async () => {
+  const locked = 'interop-locked-bucket'
+  await s3.send(new CreateBucketCommand({ Bucket: locked }))
+  await s3.send(new PutBucketVersioningCommand({
+    Bucket: locked, VersioningConfiguration: { Status: 'Enabled' },
+  }))
+  await s3.send(new PutObjectLockConfigurationCommand({
+    Bucket: locked, ObjectLockConfiguration: { ObjectLockEnabled: 'Enabled' },
+  }))
+  const config = await s3.send(new GetObjectLockConfigurationCommand({ Bucket: locked }))
+  assert(config.ObjectLockConfiguration.ObjectLockEnabled === 'Enabled', 'lock not reported as enabled')
+
+  const stored = await s3.send(new PutObjectCommand({ Bucket: locked, Key: 'wormed.txt', Body: 'immutable' }))
+  const retainUntil = new Date(Date.now() + 86400_000)
+  await s3.send(new PutObjectRetentionCommand({
+    Bucket: locked, Key: 'wormed.txt', VersionId: stored.VersionId,
+    Retention: { Mode: 'GOVERNANCE', RetainUntilDate: retainUntil },
+  }))
+  const retention = await s3.send(new GetObjectRetentionCommand({
+    Bucket: locked, Key: 'wormed.txt', VersionId: stored.VersionId,
+  }))
+  assert(retention.Retention.Mode === 'GOVERNANCE', `expected GOVERNANCE, got ${retention.Retention.Mode}`)
+
+  try {
+    await s3.send(new DeleteObjectCommand({ Bucket: locked, Key: 'wormed.txt', VersionId: stored.VersionId }))
+    throw new Error('expected the retained version to be undeletable')
+  } catch (err) {
+    assert(err.name === 'AccessDenied' || err.$metadata?.httpStatusCode === 403,
+      `expected AccessDenied, got ${err.name}`)
+  }
+
+  await s3.send(new PutObjectLegalHoldCommand({
+    Bucket: locked, Key: 'wormed.txt', VersionId: stored.VersionId, LegalHold: { Status: 'ON' },
+  }))
+  const hold = await s3.send(new GetObjectLegalHoldCommand({
+    Bucket: locked, Key: 'wormed.txt', VersionId: stored.VersionId,
+  }))
+  assert(hold.LegalHold.Status === 'ON', `expected legal hold ON, got ${hold.LegalHold.Status}`)
+
+  await s3.send(new DeleteObjectCommand({
+    Bucket: locked, Key: 'wormed.txt', VersionId: stored.VersionId,
+    BypassGovernanceRetention: true,
+  })).then(
+    () => { throw new Error('legal hold must outrank the governance bypass') },
+    (err) => assert(err.name === 'AccessDenied' || err.$metadata?.httpStatusCode === 403,
+      `expected AccessDenied, got ${err.name}`),
+  )
 })
 
 await check('DeleteObjects in bulk', async () => {
