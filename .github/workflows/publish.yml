@@ -37,15 +37,11 @@ jobs:
           package-manager-cache: false
       - run: npm ci
       # No NODE_AUTH_TOKEN: npmjs.org authenticates this workflow as a trusted
-      # publisher over OIDC. Provenance attestations are generated automatically
-      # for a public package built from a public repository.
-      #
-      # setup-node's registry-url writes an .npmrc pinning _authToken to the
-      # placeholder XXXXX-XXXXX-XXXXX-XXXXX when no token is in the env. npm is
-      # meant to override that once the OIDC exchange succeeds; if the exchange
-      # is refused it falls back to the placeholder and the registry answers 404.
-      # Verbose logging shows which of the two happened.
-      - run: npm publish --loglevel verbose
+      # publisher over OIDC, which requires a trusted publisher registered
+      # against this filename (`npm trust github --file publish.yml`). Without
+      # that registration the exchange is refused and the publish fails with a
+      # bare 404. Provenance attestations are signed automatically.
+      - run: npm publish
 
   publish-gpr:
     needs: build
@@ -61,6 +57,18 @@ jobs:
           registry-url: https://npm.pkg.github.com/
       - run: npm ci
       # GitHub Packages takes the workflow's own token; no 2FA is involved.
-      - run: npm publish
+      #
+      # A re-run for a version already on the registry answers 409. That is not
+      # a failure — the version is present, which is the desired end state — so
+      # only that code is swallowed. Every other error still fails the job.
+      - name: Publish to GitHub Packages
+        run: |
+          if output=$(npm publish 2>&1); then
+            echo "$output"
+          else
+            echo "$output"
+            grep -q 'E409' <<<"$output" || exit 1
+            echo "::notice::Version already published to GitHub Packages; nothing to do."
+          fi
         env:
           NODE_AUTH_TOKEN: ${{secrets.GITHUB_TOKEN}}
