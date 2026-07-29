@@ -39,6 +39,7 @@ const CODES: Record<string, [number, string]> = {
   NoSuchUpload: [404, 'The specified multipart upload does not exist'],
   NotImplemented: [501, 'A header you provided implies functionality that is not implemented'],
   PreconditionFailed: [412, 'At least one of the pre-conditions you specified did not hold'],
+  QuotaExceeded: [403, 'The bucket quota configured for this bucket has been exceeded'],
   RequestTimeTooSkewed: [403, 'The difference between the request time and the current time is too large'],
   SignatureDoesNotMatch: [403, 'The request signature we calculated does not match the signature you provided'],
   SlowDown: [503, 'Please reduce your request rate'],

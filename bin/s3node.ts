@@ -127,6 +127,7 @@ async function start({ reusePort = false, withConsole = true, withLifecycle = tr
       credentials: server.credentials,
       region,
       version: VERSION,
+      metrics: server.metrics,
     })
     await adminConsole.listen(consolePort, host)
   }

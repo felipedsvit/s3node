@@ -9,9 +9,11 @@ import {
   type ObjectLockConfig,
   type Retention,
 } from '../features/objectlock.js'
-import { READ_HIGH_WATER_MARK } from './blobs.js'
+import { READ_HIGH_WATER_MARK, type WriteResult } from './blobs.js'
 import type { BucketService } from './buckets.js'
 import {
+  acquireWriteSlot,
+  assertWithinQuota,
   chainStreams,
   checksumMismatch,
   newVersionId,
@@ -54,13 +56,20 @@ export class ObjectService {
     }
 
     const effectiveMax = this.ctx.maxObjectSize > 0 ? this.ctx.maxObjectSize : 0
-    const { blobId, size, hasher } = await this.ctx.blobs.write(input.body, { algorithms, transforms, maxSize: effectiveMax })
+    const release = await acquireWriteSlot(this.ctx)
+    let blobId: string, size: number, hasher: WriteResult['hasher']
+    try {
+      ({ blobId, size, hasher } = await this.ctx.blobs.write(input.body, { algorithms, transforms, maxSize: effectiveMax }))
+    } finally {
+      release()
+    }
 
     let metadataCommitted = false
     try {
       if (effectiveMax > 0 && size > effectiveMax) {
         throw new S3Error('EntityTooLarge')
       }
+      assertWithinQuota(this.ctx, input.bucket, size)
 
       const md5 = hasher.digest('md5', 'hex')
 
@@ -238,10 +247,17 @@ export class ObjectService {
     }
 
     const effectiveMax = this.ctx.maxObjectSize > 0 ? this.ctx.maxObjectSize : 0
-    const { blobId, size, hasher } = await this.ctx.blobs.write(plaintext, { algorithms: ['md5'], transforms, maxSize: effectiveMax })
+    const copyRelease = await acquireWriteSlot(this.ctx)
+    let blobId: string, size: number, hasher: WriteResult['hasher']
+    try {
+      ({ blobId, size, hasher } = await this.ctx.blobs.write(plaintext, { algorithms: ['md5'], transforms, maxSize: effectiveMax }))
+    } finally {
+      copyRelease()
+    }
     let metadataCommitted = false
     try {
       if (effectiveMax > 0 && size > effectiveMax) throw new S3Error('EntityTooLarge')
+      assertWithinQuota(this.ctx, input.bucket, size)
       const etag = `"${hasher.digest('md5', 'hex')}"`
       const lastModified = new Date()
       const versioning = this.buckets.bucketVersioning(input.bucket)

@@ -1,4 +1,5 @@
 import { S3Error } from '../errors.js'
+import type { NotificationQueueRow } from '../storage/metadata.js'
 import { childNamed, childText, childrenNamed, document, parseXml, text } from '../xml.js'
 
 const DISPATCH_TIMEOUT_MS = 5000
@@ -131,11 +132,19 @@ export function buildEvent({ eventName, region, bucket, key, size, etag, version
 }
 
 /**
- * All the dispatcher needs from a store: the ability to read one bucket's
- * notification document. ObjectStore satisfies it structurally.
+ * All the dispatcher needs from a store: the bucket's notification document,
+ * plus the persistent queue primitives. ObjectStore/MetadataStore satisfy
+ * this structurally.
  */
 export interface NotificationConfigSource {
-  metadata: { getConfig<T>(bucket: string, name: string): T | null }
+  metadata: {
+    getConfig<T>(bucket: string, name: string): T | null
+    enqueueNotification(row: { bucket: string; targetId: string; endpoint: string; payload: string; now: number }): void
+    claimDueNotifications(now: number, limit?: number): NotificationQueueRow[]
+    rescheduleNotification(id: number, attempts: number, nextAttemptAt: number): void
+    deadLetterNotification(id: number, attempts: number): void
+    deleteNotification(id: number): void
+  }
 }
 
 export interface NotificationLogger {
@@ -146,23 +155,61 @@ export interface NotificationDispatcherOptions {
   region?: string
   logger?: NotificationLogger | null | undefined
   fetchImpl?: typeof fetch
+  /** Injectable clock, so tests can advance retry backoff without real sleeps. */
+  now?: () => number
+  /** Failed deliveries beyond this many attempts move to the dead letter status instead of retrying again. */
+  maxAttempts?: number
+  baseBackoffMs?: number
+  maxBackoffMs?: number
+  /** How often the background worker sweeps the queue for due deliveries. 0 disables the worker (drain() still works). */
+  intervalMs?: number
 }
 
+const DEFAULT_MAX_ATTEMPTS = 6
+const DEFAULT_BASE_BACKOFF_MS = 1000
+const DEFAULT_MAX_BACKOFF_MS = 60_000
+const DEFAULT_INTERVAL_MS = 2000
+
+/**
+ * Enqueues matching events into a SQLite-backed queue and delivers them from
+ * a periodic worker with exponential backoff, so a webhook that's briefly
+ * down doesn't silently drop events the way a fire-and-forget `fetch()`
+ * would. Failed deliveries retry up to `maxAttempts` times before moving to
+ * the `dead` status for manual inspection/replay.
+ */
 export class NotificationDispatcher {
   store: NotificationConfigSource
   region: string
   logger: NotificationLogger | null
   fetchImpl: typeof fetch
+  now: () => number
+  maxAttempts: number
+  baseBackoffMs: number
+  maxBackoffMs: number
   inFlight: Set<Promise<void>>
+  private timer: ReturnType<typeof setInterval> | null
 
-  constructor(store: NotificationConfigSource, { region = 'us-east-1', logger = null, fetchImpl = fetch }: NotificationDispatcherOptions = {}) {
+  constructor(store: NotificationConfigSource, {
+    region = 'us-east-1', logger = null, fetchImpl = fetch, now = Date.now,
+    maxAttempts = DEFAULT_MAX_ATTEMPTS, baseBackoffMs = DEFAULT_BASE_BACKOFF_MS, maxBackoffMs = DEFAULT_MAX_BACKOFF_MS,
+    intervalMs = DEFAULT_INTERVAL_MS,
+  }: NotificationDispatcherOptions = {}) {
     this.store = store
     this.region = region
     this.logger = logger
     this.fetchImpl = fetchImpl
+    this.now = now
+    this.maxAttempts = maxAttempts
+    this.baseBackoffMs = baseBackoffMs
+    this.maxBackoffMs = maxBackoffMs
     this.inFlight = new Set()
+    this.timer = intervalMs > 0
+      ? setInterval(() => { this.processQueue().catch(() => {}) }, intervalMs)
+      : null
+    this.timer?.unref?.()
   }
 
+  /** Matches the event against the bucket's configured targets and enqueues one row per match. Never touches the network. */
   dispatch({ bucket, eventName, key, size, etag, versionId }: {
     bucket: string
     eventName: string
@@ -179,6 +226,7 @@ export class NotificationDispatcher {
     }
     if (!config?.targets?.length) return
 
+    const now = this.now()
     for (const target of config.targets) {
       if (!target.events.some((pattern) => eventMatches(pattern, eventName))) continue
       if (!filterMatches(target.filter ?? {}, key)) continue
@@ -187,21 +235,56 @@ export class NotificationDispatcher {
         eventName, region: this.region, bucket, key, size, etag, versionId,
         configurationId: target.id,
       })
-      const promise: Promise<void> = (this.fetchImpl(target.endpoint, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-amz-event-source': 's3node' } as Record<string, string>,
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(DISPATCH_TIMEOUT_MS),
-      }) as Promise<Response>).catch((err: Error) => {
-        this.logger?.error?.({ message: 'notification delivery failed', endpoint: target.endpoint, error: err.message })
-      }).finally(() => this.inFlight.delete(promise)) as Promise<void>
-      this.inFlight.add(promise)
+      this.store.metadata.enqueueNotification({
+        bucket, targetId: target.id, endpoint: target.endpoint, payload: JSON.stringify(payload), now,
+      })
     }
   }
 
+  /** One sweep: claims due rows and attempts delivery for each. Safe to call concurrently with the background worker. */
+  async processQueue(): Promise<void> {
+    const due = this.store.metadata.claimDueNotifications(this.now())
+    await Promise.allSettled(due.map((row) => this._attempt(row)))
+  }
+
+  private _attempt(row: NotificationQueueRow): Promise<void> {
+    const promise: Promise<void> = (this.fetchImpl(row.endpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-amz-event-source': 's3node' } as Record<string, string>,
+      body: row.payload,
+      signal: AbortSignal.timeout(DISPATCH_TIMEOUT_MS),
+    }) as Promise<Response>).then(() => {
+      this.store.metadata.deleteNotification(row.id)
+    }).catch((err: Error) => {
+      const attempts = row.attempts + 1
+      if (attempts >= this.maxAttempts) {
+        this.store.metadata.deadLetterNotification(row.id, attempts)
+        this.logger?.error?.({
+          message: 'notification moved to dead-letter', endpoint: row.endpoint, attempts, error: err.message,
+        })
+        return
+      }
+      const backoffMs = Math.min(this.baseBackoffMs * 2 ** row.attempts, this.maxBackoffMs)
+      this.store.metadata.rescheduleNotification(row.id, attempts, this.now() + backoffMs)
+      this.logger?.error?.({
+        message: 'notification delivery failed, retrying', endpoint: row.endpoint, attempts, error: err.message,
+      })
+    }).finally(() => this.inFlight.delete(promise)) as Promise<void>
+    this.inFlight.add(promise)
+    return promise
+  }
+
+  /** Runs one queue sweep and waits for everything it kicked off — used by tests and graceful shutdown. */
   async drain(): Promise<void> {
+    await this.processQueue()
     while (this.inFlight.size) await Promise.allSettled([...this.inFlight])
+  }
+
+  close(): void {
+    if (this.timer) clearInterval(this.timer)
+    this.timer = null
   }
 }
 
 export { KNOWN_EVENTS }
+export type { NotificationQueueRow } from '../storage/metadata.js'

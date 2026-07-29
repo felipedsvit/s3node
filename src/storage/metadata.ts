@@ -4,7 +4,10 @@ import { keySuccessor, prefixUpperBound, toKeyBuffer } from '../util/bytes.js'
 import type { BlobPart } from './blobs.js'
 import { LRUCache } from './cache.js'
 
-export const SCHEMA_VERSION = 3
+// v4 only adds a new table (CREATE TABLE IF NOT EXISTS), so it needs no
+// migrate function: unlike the v1->v2/v2->v3 ALTERs, there is no existing
+// data to reshape for a table that didn't exist before.
+export const SCHEMA_VERSION = 4
 export const NULL_VERSION = 'null'
 
 const SCHEMA = `
@@ -69,6 +72,20 @@ CREATE TABLE IF NOT EXISTS upload_parts (
   uploaded_at   INTEGER NOT NULL,
   PRIMARY KEY (upload_id, part_number)
 ) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS notification_queue (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  bucket          TEXT NOT NULL,
+  target_id       TEXT NOT NULL,
+  endpoint        TEXT NOT NULL,
+  payload         TEXT NOT NULL,
+  attempts        INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at INTEGER NOT NULL,
+  status          TEXT NOT NULL DEFAULT 'pending',
+  created_at      INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS notification_queue_due ON notification_queue (status, next_attempt_at);
 `
 
 const LIST_BATCH = 512
@@ -227,6 +244,20 @@ interface CountRow {
   total: number
 }
 
+interface UsageRow {
+  objects: number
+  bytes: number
+}
+
+export interface NotificationQueueRow {
+  id: number
+  bucket: string
+  target_id: string
+  endpoint: string
+  payload: string
+  attempts: number
+}
+
 interface MaxSeqRow {
   value: number
 }
@@ -292,6 +323,23 @@ export class MetadataStore {
       listBuckets: this.db.prepare('SELECT name, created_at, region FROM buckets ORDER BY name ASC'),
       deleteBucket: this.db.prepare('DELETE FROM buckets WHERE name = ?'),
       countObjects: this.db.prepare('SELECT count(*) AS total FROM objects WHERE bucket = ?'),
+      bucketUsage: this.db.prepare(
+        'SELECT count(*) AS objects, COALESCE(SUM(size), 0) AS bytes FROM objects ' +
+        'WHERE bucket = ? AND is_latest = 1 AND is_delete_marker = 0'),
+
+      enqueueNotification: this.db.prepare(
+        'INSERT INTO notification_queue (bucket, target_id, endpoint, payload, attempts, next_attempt_at, status, created_at) ' +
+        "VALUES (?, ?, ?, ?, 0, ?, 'pending', ?)"),
+      // Atomically flips due rows to 'in-flight' and returns them in one step, so the
+      // periodic worker and an explicit drain() can never both pick up the same row.
+      claimDueNotifications: this.db.prepare(
+        "UPDATE notification_queue SET status = 'in-flight' WHERE id IN (" +
+        "  SELECT id FROM notification_queue WHERE status = 'pending' AND next_attempt_at <= ? ORDER BY id LIMIT ?" +
+        ') RETURNING id, bucket, target_id, endpoint, payload, attempts'),
+      rescheduleNotification: this.db.prepare(
+        "UPDATE notification_queue SET status = 'pending', attempts = ?, next_attempt_at = ? WHERE id = ?"),
+      deadLetterNotification: this.db.prepare("UPDATE notification_queue SET status = 'dead', attempts = ? WHERE id = ?"),
+      deleteNotification: this.db.prepare('DELETE FROM notification_queue WHERE id = ?'),
 
       getConfig: this.db.prepare('SELECT value FROM bucket_config WHERE bucket = ? AND name = ?'),
       putConfig: this.db.prepare(
@@ -438,6 +486,35 @@ export class MetadataStore {
 
   isBucketEmpty(name: string): boolean {
     return (this.statements.countObjects.get(name) as unknown as CountRow).total === 0
+  }
+
+  /** Current (non-delete-marker) object count and total byte size for a bucket, for quota checks. */
+  bucketUsage(bucket: string): { objects: number; bytes: number } {
+    const row = this.statements.bucketUsage.get(bucket) as unknown as UsageRow
+    return { objects: row.objects, bytes: row.bytes }
+  }
+
+  enqueueNotification({ bucket, targetId, endpoint, payload, now }: {
+    bucket: string; targetId: string; endpoint: string; payload: string; now: number
+  }): void {
+    this.statements.enqueueNotification.run(bucket, targetId, endpoint, payload, now, now)
+  }
+
+  /** Claims up to `limit` due rows for delivery, marking them 'in-flight' so no other caller can also pick them up. */
+  claimDueNotifications(now: number, limit = 100): NotificationQueueRow[] {
+    return this.statements.claimDueNotifications.all(now, limit) as unknown as NotificationQueueRow[]
+  }
+
+  rescheduleNotification(id: number, attempts: number, nextAttemptAt: number): void {
+    this.statements.rescheduleNotification.run(attempts, nextAttemptAt, id)
+  }
+
+  deadLetterNotification(id: number, attempts: number): void {
+    this.statements.deadLetterNotification.run(attempts, id)
+  }
+
+  deleteNotification(id: number): void {
+    this.statements.deleteNotification.run(id)
   }
 
   /**

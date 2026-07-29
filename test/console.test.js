@@ -29,6 +29,7 @@ before(async () => {
     credentials: harness.server.credentials,
     region: 'us-east-1',
     version: '0.1.4',
+    metrics: harness.server.metrics,
   })
   base = await admin.listen(0, '127.0.0.1')
 })
@@ -138,5 +139,25 @@ describe('console API', () => {
 
   it('404s an unknown API path', async () => {
     assert.equal((await call('/api/nonsense')).status, 404)
+  })
+})
+
+describe('health and metrics', () => {
+  it('reports health without credentials', async () => {
+    const response = await call('/-/health', { credential: null })
+    assert.equal(response.status, 200)
+    assert.equal(response.text, 'ok\n')
+  })
+
+  it('exposes Prometheus metrics without credentials', async () => {
+    await call('/api/bucket?name=metrics-bucket', { method: 'POST' })
+    await call('/api/object?bucket=metrics-bucket&key=a.bin', { method: 'PUT', body: 'abcde' })
+
+    const response = await call('/metrics', { credential: null })
+    assert.equal(response.status, 200)
+    assert.match(response.headers.get('content-type'), /^text\/plain/)
+    assert.match(response.text, /^# HELP s3node_http_requests_total/m)
+    assert.match(response.text, /^s3node_http_requests_total\{/m)
+    assert.match(response.text, /^s3node_active_multipart_uploads 0$/m)
   })
 })

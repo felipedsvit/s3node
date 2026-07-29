@@ -9,6 +9,7 @@ import { MAX_OBJECT_SIZE, ObjectStore } from '../dist/src/storage/store.js'
 import { BlobStore } from '../dist/src/storage/blobs.js'
 import { MetadataStore } from '../dist/src/storage/metadata.js'
 import { EncryptionManager } from '../dist/src/features/encryption.js'
+import { Semaphore } from '../dist/src/util/semaphore.js'
 
 let root
 let store
@@ -392,6 +393,8 @@ describe('dependency injection', () => {
       minPartSize: 8,
       maxObjectSize: MAX_OBJECT_SIZE,
       maxConcurrentUploads: 10,
+      maxConcurrentWrites: 0,
+      writeSemaphore: new Semaphore(0),
     })
 
     try {
@@ -410,6 +413,24 @@ describe('dependency injection', () => {
     assert.equal(typeof store.buckets.requireBucket, 'function')
     assert.equal(typeof store.objects.putObject, 'function')
     assert.equal(typeof store.multipart.uploadPart, 'function')
+  })
+})
+
+describe('maxConcurrentWrites', () => {
+  it('serializes writes through the shared semaphore without deadlocking', async () => {
+    const dataDir = await mkdtemp(join(root, 'write-semaphore-'))
+    const limited = await ObjectStore.open({ dataDir, maxConcurrentWrites: 1 })
+    try {
+      limited.createBucket('bkt')
+      await Promise.all([
+        limited.putObject({ bucket: 'bkt', key: 'a', body: body('hello-a') }),
+        limited.putObject({ bucket: 'bkt', key: 'b', body: body('hello-b') }),
+      ])
+      assert.equal(limited.getObject('bkt', 'a').size, 7)
+      assert.equal(limited.getObject('bkt', 'b').size, 7)
+    } finally {
+      limited.close()
+    }
   })
 })
 

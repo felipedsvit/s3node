@@ -25,9 +25,11 @@ import { evaluatePolicy, objectArn } from './features/policy.js'
 import type { PolicyDocument } from './features/policy.js'
 import { createContext, sendEmpty, sendError } from './http.js'
 import type { RequestContext } from './http.js'
+import { MetricsRegistry } from './metrics.js'
 import { resolveRoute } from './router.js'
 import { ObjectStore } from './storage/store.js'
 import type { ObjectRecord } from './storage/metadata.js'
+import { RateLimiter } from './util/rateLimiter.js'
 
 const DEFAULT_REGION = 'us-east-1'
 
@@ -53,6 +55,12 @@ export interface ServerOptions {
   virtualHostDomain?: string | null
   logger?: { error: (entry: Record<string, unknown>) => void } | null
   lifecycleIntervalMs?: number
+  /** How often the notification worker sweeps the queue for due deliveries. 0 disables the background worker. */
+  notificationIntervalMs?: number
+  /** Sustained requests/sec allowed per caller (access key, or source IP when anonymous). Unset disables rate limiting. */
+  rateLimitPerSecond?: number
+  /** Burst capacity for the rate limiter; defaults to `rateLimitPerSecond` when that option is set. */
+  rateLimitBurst?: number
 }
 
 export interface CreateOptions {
@@ -65,9 +73,13 @@ export interface CreateOptions {
   minPartSize?: number
   maxObjectSize?: number
   maxConcurrentUploads?: number
+  maxConcurrentWrites?: number
   encryptionMasterKey?: string | Buffer | null
   lifecycleIntervalMs?: number
+  notificationIntervalMs?: number
   logger?: { error: (entry: Record<string, unknown>) => void } | null
+  rateLimitPerSecond?: number
+  rateLimitBurst?: number
 }
 
 export class S3NodeServer {
@@ -79,6 +91,8 @@ export class S3NodeServer {
   notifications: NotificationDispatcher
   lifecycleTimer: ReturnType<typeof setInterval> | null
   http: ReturnType<typeof createHttpServer>
+  metrics: MetricsRegistry
+  rateLimiter: RateLimiter | null
   endpoint?: string
 
   constructor(options: ServerOptions) {
@@ -90,8 +104,13 @@ export class S3NodeServer {
     this.notifications = new NotificationDispatcher(this.store, {
       region: this.region,
       logger: this.logger ?? undefined,
+      intervalMs: options.notificationIntervalMs,
     })
     this.lifecycleTimer = null
+    this.metrics = new MetricsRegistry()
+    this.rateLimiter = options.rateLimitPerSecond
+      ? new RateLimiter(options.rateLimitBurst ?? options.rateLimitPerSecond, options.rateLimitPerSecond)
+      : null
     this.http = createHttpServer()
 
     this.http.on('request', (req: IncomingMessage, res: ServerResponse) => {
@@ -122,6 +141,7 @@ export class S3NodeServer {
       minPartSize: options.minPartSize,
       maxObjectSize: options.maxObjectSize,
       maxConcurrentUploads: options.maxConcurrentUploads,
+      maxConcurrentWrites: options.maxConcurrentWrites,
       encryptionMasterKey: options.encryptionMasterKey ?? null,
     })
     return new S3NodeServer({
@@ -131,6 +151,9 @@ export class S3NodeServer {
       virtualHostDomain: options.virtualHostDomain,
       logger: options.logger,
       lifecycleIntervalMs: options.lifecycleIntervalMs,
+      notificationIntervalMs: options.notificationIntervalMs,
+      rateLimitPerSecond: options.rateLimitPerSecond,
+      rateLimitBurst: options.rateLimitBurst,
     })
   }
 
@@ -139,7 +162,9 @@ export class S3NodeServer {
   }
 
   async _handle(req: IncomingMessage, res: ServerResponse, expectContinue: boolean): Promise<void> {
+    const start = process.hrtime.bigint()
     let ctx: RequestContext | null = null
+    let action = req.method ?? 'unknown'
     try {
       ctx = createContext(req, { virtualHostDomain: this.virtualHostDomain })
 
@@ -149,11 +174,16 @@ export class S3NodeServer {
       }
 
       const route = resolveRoute(ctx)
+      action = route.action
       const selfAuthenticating = route.selfAuthenticating === true
 
       ctx.auth = selfAuthenticating
         ? { anonymous: false, deferred: true, payloadHash: null }
         : this._authenticate(ctx)
+
+      if (this.rateLimiter && !this.rateLimiter.allow(this._rateLimitKey(ctx))) {
+        throw new S3Error('SlowDown', 'Request rate limit exceeded')
+      }
 
       if (!selfAuthenticating) this.authorize(ctx, route.action, route.resource as string)
 
@@ -162,8 +192,11 @@ export class S3NodeServer {
       this._attachBody(ctx)
       this._applyCors(ctx, res)
       await route.handler(ctx, res, { store: this.store, server: this })
+      this._recordMetrics(action, req, res, start)
     } catch (err) {
       const rendered = sendError(ctx, res, err)
+      this.metrics.httpErrorsTotal.inc({ code: rendered.code })
+      this._recordMetrics(action, req, res, start)
       this.logger?.error?.({
         requestId: ctx?.requestId,
         method: req.method,
@@ -174,6 +207,31 @@ export class S3NodeServer {
         stringToSign: rendered.detail?.stringToSign,
       })
     }
+  }
+
+  /**
+   * Byte counts come from Content-Length headers rather than instrumenting
+   * the stream: most handlers already declare one (fixed bodies, or known
+   * object size for streamed GETs), and that avoids wrapping every
+   * `res.write`/`res.end` call just to keep a running total.
+   */
+  _recordMetrics(action: string, req: IncomingMessage, res: ServerResponse, start: bigint): void {
+    const elapsedSeconds = Number(process.hrtime.bigint() - start) / 1e9
+    const status = String(res.statusCode)
+    this.metrics.httpRequestsTotal.inc({ action, method: req.method ?? 'unknown', status })
+    this.metrics.httpRequestDurationSeconds.observe({ action }, elapsedSeconds)
+    const bytesIn = Number(req.headers['content-length'] ?? 0)
+    if (bytesIn > 0) this.metrics.bytesInTotal.inc({}, bytesIn)
+    const bytesOut = Number(res.getHeader('content-length') ?? 0)
+    if (bytesOut > 0) this.metrics.bytesOutTotal.inc({}, bytesOut)
+  }
+
+  /** Rate-limits by access key when signed, falling back to source IP for anonymous requests. */
+  _rateLimitKey(ctx: RequestContext): string {
+    if (!ctx.auth?.anonymous && (ctx.auth as Record<string, string>)?.accessKeyId) {
+      return `key:${(ctx.auth as Record<string, string>).accessKeyId}`
+    }
+    return `ip:${(ctx.req.socket as import('node:net').Socket)?.remoteAddress ?? 'unknown'}`
   }
 
   _authenticate(ctx: RequestContext): Record<string, unknown> {
@@ -202,6 +260,9 @@ export class S3NodeServer {
 
   _conditionContext(ctx: RequestContext): Record<string, string | undefined | null> {
     const socket = ctx.req.socket
+    // Only queried for bucket-scoped requests (ListBuckets etc. has no ctx.bucket), so
+    // policies that never reference these keys don't pay for an extra aggregate query.
+    const usage = ctx.bucket ? this.store.metadata.bucketUsage(ctx.bucket) : null
     return {
       principal: ctx.auth?.anonymous ? '*' : `arn:aws:iam::s3node:user/${(ctx.auth as Record<string, string>).accessKeyId}`,
       'aws:sourceip': (socket as import('node:net').Socket)?.remoteAddress ?? '',
@@ -215,6 +276,8 @@ export class S3NodeServer {
       's3:x-amz-acl': ctx.headers['x-amz-acl'] as string | undefined,
       's3:x-amz-server-side-encryption': ctx.headers['x-amz-server-side-encryption'] as string | undefined,
       's3:x-amz-content-sha256': ctx.headers['x-amz-content-sha256'] as string | undefined,
+      's3:bucket-size': usage ? String(usage.bytes) : undefined,
+      's3:bucket-object-count': usage ? String(usage.objects) : undefined,
     }
   }
 
@@ -316,6 +379,7 @@ export class S3NodeServer {
 
   async close(): Promise<void> {
     if (this.lifecycleTimer) clearInterval(this.lifecycleTimer)
+    this.notifications.close()
     await new Promise<void>((resolve) => this.http.close(() => resolve()))
     await this.notifications.drain()
     this.store.close()

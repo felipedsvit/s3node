@@ -4,6 +4,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { pipeline } from 'node:stream/promises'
 import type { CredentialStore } from '../auth/credentials.js'
 import { S3Error } from '../errors.js'
+import type { MetricsRegistry } from '../metrics.js'
 import type { ObjectStore } from '../storage/store.js'
 import { CONSOLE_HTML, CONSOLE_FAVICON_SVG } from './page.js'
 
@@ -25,6 +26,7 @@ export interface ConsoleOptions {
   credentials: CredentialStore
   region: string
   version: string
+  metrics?: MetricsRegistry
 }
 
 const MAX_LIST_KEYS = 1000
@@ -85,12 +87,35 @@ export class ConsoleServer {
   }
 
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const url = new URL(req.url ?? '/', 'http://localhost')
+
+    // Health and metrics stay unauthenticated: scrapers and orchestrators
+    // don't carry an s3node credential, and this server binds loopback by
+    // default, same trust boundary as the rest of the console.
+    if (url.pathname === '/-/health' && req.method === 'GET') {
+      const body = Buffer.from('ok\n', 'utf8')
+      res.writeHead(200, { 'Content-Type': 'text/plain', 'Content-Length': body.length })
+      res.end(body)
+      return
+    }
+
+    if (url.pathname === '/metrics' && req.method === 'GET') {
+      const { store, metrics } = this.options
+      if (!metrics) { res.writeHead(404, { 'Content-Type': 'text/plain' }); res.end('Metrics not enabled\n'); return }
+      const buckets = store.listBuckets()
+      const activeUploads = buckets.reduce((total, bucket) => total + store.metadata.uploadCount(bucket.name), 0)
+      metrics.activeMultipartUploads.set({}, activeUploads)
+      const body = Buffer.from(metrics.renderPrometheus(), 'utf8')
+      res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4', 'Content-Length': body.length })
+      res.end(body)
+      return
+    }
+
     if (!authenticate(req, this.options.credentials)) {
       unauthorized(res)
       return
     }
 
-    const url = new URL(req.url ?? '/', 'http://localhost')
     const params = url.searchParams
     const { store } = this.options
 

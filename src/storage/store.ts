@@ -4,11 +4,13 @@ import type { Readable } from 'node:stream'
 import { EncryptionManager, type SseRequest } from '../features/encryption.js'
 import type { LockState, Retention } from '../features/objectlock.js'
 import { CHECKSUM_ALGORITHMS } from '../util/hash.js'
+import { Semaphore } from '../util/semaphore.js'
 import { BlobStore, READ_HIGH_WATER_MARK } from './blobs.js'
 import { BucketService } from './buckets.js'
 import {
   DEFAULT_MIN_PART_SIZE,
   MAX_CONCURRENT_UPLOADS,
+  MAX_CONCURRENT_WRITES,
   MAX_OBJECT_SIZE,
   type StoreContext,
 } from './context.js'
@@ -38,6 +40,7 @@ export {
   CONFIG_NAMES,
   DEFAULT_MIN_PART_SIZE,
   MAX_CONCURRENT_UPLOADS,
+  MAX_CONCURRENT_WRITES,
   MAX_KEY_BYTES,
   MAX_OBJECT_SIZE,
   MAX_PARTS,
@@ -45,7 +48,7 @@ export {
   validateKey,
 } from './context.js'
 export { READ_HIGH_WATER_MARK }
-export type { StoreContext, StoreLimits } from './context.js'
+export type { BucketQuota, StoreContext, StoreLimits } from './context.js'
 export { BucketService } from './buckets.js'
 export { ObjectService } from './objects.js'
 export { MultipartService } from './multipart.js'
@@ -59,6 +62,7 @@ export interface ObjectStoreOptions {
   minPartSize?: number
   maxObjectSize?: number
   maxConcurrentUploads?: number
+  maxConcurrentWrites?: number
 }
 
 export interface OpenOptions extends ObjectStoreOptions {
@@ -88,6 +92,7 @@ export class ObjectStore {
     await mkdir(options.dataDir, { recursive: true })
     const blobs = new BlobStore(options.dataDir)
     await blobs.init()
+    const maxConcurrentWrites = options.maxConcurrentWrites ?? MAX_CONCURRENT_WRITES
     return new ObjectStore({
       metadata: new MetadataStore(join(options.dataDir, 'metadata.sqlite')),
       blobs,
@@ -97,6 +102,8 @@ export class ObjectStore {
       minPartSize: options.minPartSize ?? DEFAULT_MIN_PART_SIZE,
       maxObjectSize: options.maxObjectSize ?? MAX_OBJECT_SIZE,
       maxConcurrentUploads: options.maxConcurrentUploads ?? MAX_CONCURRENT_UPLOADS,
+      maxConcurrentWrites,
+      writeSemaphore: new Semaphore(maxConcurrentWrites),
     })
   }
 
@@ -107,6 +114,7 @@ export class ObjectStore {
   get minPartSize(): number { return this.ctx.minPartSize }
   get maxObjectSize(): number { return this.ctx.maxObjectSize }
   get maxConcurrentUploads(): number { return this.ctx.maxConcurrentUploads }
+  get maxConcurrentWrites(): number { return this.ctx.maxConcurrentWrites }
 
   close(): void {
     this.ctx.metadata.close()

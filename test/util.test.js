@@ -5,6 +5,9 @@ import { HashingStream, multipartEtag } from '../dist/src/util/hash.js'
 import { compareKeys, keySuccessor, prefixUpperBound } from '../dist/src/util/bytes.js'
 import { parseRange, evaluatePreconditions, parseQueryPairs } from '../dist/src/http.js'
 import { S3Error } from '../dist/src/errors.js'
+import { Semaphore } from '../dist/src/util/semaphore.js'
+import { BufferPool } from '../dist/src/util/bufferPool.js'
+import { RateLimiter } from '../dist/src/util/rateLimiter.js'
 
 describe('CRC', () => {
   // 0xCBF43926 / 0xE3069283 over "123456789" are the standard check values.
@@ -142,5 +145,122 @@ describe('parseQueryPairs', () => {
 
   it('treats a bare flag as an empty value', () => {
     assert.deepEqual(parseQueryPairs('uploads'), [['uploads', '']])
+  })
+})
+
+describe('Semaphore', () => {
+  it('grants immediately while slots are free', async () => {
+    const sem = new Semaphore(2)
+    const releaseA = await sem.acquire()
+    const releaseB = await sem.acquire()
+    assert.equal(typeof releaseA, 'function')
+    assert.equal(typeof releaseB, 'function')
+    releaseA()
+    releaseB()
+  })
+
+  it('queues past the limit and grants in order once a slot frees up', async () => {
+    const sem = new Semaphore(1)
+    const releaseA = await sem.acquire()
+
+    const order = []
+    const p1 = sem.acquire().then((release) => { order.push(1); return release })
+    const p2 = sem.acquire().then((release) => { order.push(2); return release })
+
+    // Neither queued acquire should resolve before the held slot is released.
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    assert.deepEqual(order, [])
+
+    releaseA()
+    const releaseB = await p1
+    assert.deepEqual(order, [1])
+    releaseB()
+    const releaseC = await p2
+    assert.deepEqual(order, [1, 2])
+    releaseC()
+  })
+
+  it('rejects a queued acquire that times out instead of waiting forever', async () => {
+    const sem = new Semaphore(1)
+    await sem.acquire() // never released — holds the only slot
+    await assert.rejects(sem.acquire(20), /timed out/)
+  })
+
+  it('treats limit <= 0 as disabled: acquire always grants a no-op release', async () => {
+    const sem = new Semaphore(0)
+    const releases = await Promise.all([sem.acquire(), sem.acquire(), sem.acquire()])
+    for (const release of releases) release()
+  })
+})
+
+describe('BufferPool', () => {
+  it('allocates a new buffer of the right size when the pool is empty', () => {
+    const pool = new BufferPool(64, 2)
+    const buf = pool.rent()
+    assert.equal(buf.length, 64)
+  })
+
+  it('reuses a released buffer instead of allocating a new one', () => {
+    const pool = new BufferPool(64, 2)
+    const first = pool.rent()
+    pool.release(first)
+    assert.equal(pool.pooled, 1)
+    const second = pool.rent()
+    assert.equal(second, first)
+    assert.equal(pool.pooled, 0)
+  })
+
+  it('drops buffers once the pool is at capacity', () => {
+    const pool = new BufferPool(64, 1)
+    pool.release(Buffer.allocUnsafe(64))
+    pool.release(Buffer.allocUnsafe(64))
+    assert.equal(pool.pooled, 1)
+  })
+
+  it('ignores a released buffer of the wrong size', () => {
+    const pool = new BufferPool(64, 2)
+    pool.release(Buffer.allocUnsafe(32))
+    assert.equal(pool.pooled, 0)
+  })
+
+  it('use() releases the buffer even when the callback throws', async () => {
+    const pool = new BufferPool(64, 2)
+    await assert.rejects(pool.use(() => { throw new Error('boom') }), /boom/)
+    assert.equal(pool.pooled, 1)
+  })
+
+  it('rejects a non-positive size or negative count', () => {
+    assert.throws(() => new BufferPool(0, 1), RangeError)
+    assert.throws(() => new BufferPool(64, -1), RangeError)
+  })
+})
+
+describe('RateLimiter', () => {
+  it('allows bursts up to capacity, then throttles', () => {
+    const limiter = new RateLimiter(3, 1000)
+    assert.equal(limiter.allow('a'), true)
+    assert.equal(limiter.allow('a'), true)
+    assert.equal(limiter.allow('a'), true)
+    assert.equal(limiter.allow('a'), false)
+  })
+
+  it('refills tokens over time', async () => {
+    const limiter = new RateLimiter(1, 100) // 1 token / 10ms
+    assert.equal(limiter.allow('a'), true)
+    assert.equal(limiter.allow('a'), false)
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    assert.equal(limiter.allow('a'), true)
+  })
+
+  it('tracks each key independently', () => {
+    const limiter = new RateLimiter(1, 1)
+    assert.equal(limiter.allow('a'), true)
+    assert.equal(limiter.allow('b'), true)
+    assert.equal(limiter.allow('a'), false)
+  })
+
+  it('rejects a non-positive capacity or refill rate', () => {
+    assert.throws(() => new RateLimiter(0, 1), RangeError)
+    assert.throws(() => new RateLimiter(1, 0), RangeError)
   })
 })

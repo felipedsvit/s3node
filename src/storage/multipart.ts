@@ -3,10 +3,12 @@ import { S3Error } from '../errors.js'
 import type { EncryptionContext } from '../features/encryption.js'
 import { toKeyBuffer } from '../util/bytes.js'
 import { multipartEtag } from '../util/hash.js'
-import type { BlobPart } from './blobs.js'
+import type { BlobPart, WriteResult } from './blobs.js'
 import type { BucketService } from './buckets.js'
 import {
   MAX_PARTS,
+  acquireWriteSlot,
+  assertWithinQuota,
   checksumMismatch,
   newVersionId,
   validateKey,
@@ -80,7 +82,13 @@ export class MultipartService {
     }
 
     const effectiveMax = this.ctx.maxObjectSize > 0 ? this.ctx.maxObjectSize : 0
-    const { blobId, size, hasher } = await this.ctx.blobs.write(input.body, { algorithms, transforms, maxSize: effectiveMax })
+    const release = await acquireWriteSlot(this.ctx)
+    let blobId: string, size: number, hasher: WriteResult['hasher']
+    try {
+      ({ blobId, size, hasher } = await this.ctx.blobs.write(input.body, { algorithms, transforms, maxSize: effectiveMax }))
+    } finally {
+      release()
+    }
     let metadataCommitted = false
     try {
       if (effectiveMax > 0 && size > effectiveMax) throw new S3Error('EntityTooLarge')
@@ -136,9 +144,15 @@ export class MultipartService {
     }
 
     const effectiveMax = this.ctx.maxObjectSize > 0 ? this.ctx.maxObjectSize : 0
-    const { blobId, size, hasher } = await this.ctx.blobs.write(plaintext, {
-      algorithms: ['md5'], transforms, maxSize: effectiveMax,
-    })
+    const copyRelease = await acquireWriteSlot(this.ctx)
+    let blobId: string, size: number, hasher: WriteResult['hasher']
+    try {
+      ({ blobId, size, hasher } = await this.ctx.blobs.write(plaintext, {
+        algorithms: ['md5'], transforms, maxSize: effectiveMax,
+      }))
+    } finally {
+      copyRelease()
+    }
 
     let metadataCommitted = false
     try {
@@ -212,6 +226,7 @@ export class MultipartService {
     if (this.ctx.maxObjectSize > 0 && size > this.ctx.maxObjectSize) {
       throw new S3Error('EntityTooLarge')
     }
+    assertWithinQuota(this.ctx, input.bucket, size)
     const etag = `"${multipartEtag(manifest.map((part) => part.etag.replaceAll('"', '')))}"`
     const lastModified = new Date()
     const versioning = this.buckets.bucketVersioning(input.bucket)
