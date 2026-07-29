@@ -56,7 +56,8 @@ jobs:
       - name: Authenticate Snyk
         run: snyk auth ${{ secrets.SNYK_TOKEN }}
       - name: Snyk Code test
-        run: snyk code test --sarif > snyk-code.sarif # || true
+        continue-on-error: true
+        run: snyk code test --sarif > snyk-code.sarif
 
         # Runs Snyk Open Source (SCA) analysis and uploads result to Snyk.
       - name: Snyk Open Source monitor
