@@ -37,6 +37,9 @@ export class Semaphore {
       this.queue.push(grant)
 
       if (timeoutMs > 0) {
+        // Deliberately not unref'd: an unref'd timer can let the process
+        // decide the event loop is empty and exit before it fires, leaving
+        // this promise permanently unsettled instead of rejecting.
         timer = setTimeout(() => {
           if (settled) return
           settled = true
@@ -44,7 +47,6 @@ export class Semaphore {
           if (index !== -1) this.queue.splice(index, 1)
           reject(new Error('Semaphore acquire timed out'))
         }, timeoutMs)
-        timer.unref?.()
       }
     })
   }
