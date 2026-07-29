@@ -1,3 +1,5 @@
+<img src="https://raw.githubusercontent.com/felipedsvit/s3node/main/assets/logo.png" alt="s3node" width="112">
+
 # s3node
 
 An embeddable, S3-compatible object storage server for Node.js. Zero runtime

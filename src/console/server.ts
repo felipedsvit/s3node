@@ -5,7 +5,7 @@ import { pipeline } from 'node:stream/promises'
 import type { CredentialStore } from '../auth/credentials.js'
 import { S3Error } from '../errors.js'
 import type { ObjectStore } from '../storage/store.js'
-import { CONSOLE_HTML } from './page.js'
+import { CONSOLE_HTML, CONSOLE_FAVICON_SVG } from './page.js'
 
 /**
  * A minimal admin UI, served on its own port.
@@ -99,8 +99,21 @@ export class ConsoleServer {
       res.writeHead(200, {
         'Content-Type': 'text/html; charset=utf-8',
         'Content-Length': body.length,
-        // The page is entirely self-contained; forbid anything external.
-        'Content-Security-Policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; form-action 'none'",
+        // The page is entirely self-contained; forbid anything external. The
+        // only image it asks for is the favicon, served from this same origin.
+        'Content-Security-Policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self'; connect-src 'self'; form-action 'none'",
+        'X-Content-Type-Options': 'nosniff',
+      })
+      res.end(body)
+      return
+    }
+
+    if (url.pathname === '/favicon.svg' && req.method === 'GET') {
+      const body = Buffer.from(CONSOLE_FAVICON_SVG, 'utf8')
+      res.writeHead(200, {
+        'Content-Type': 'image/svg+xml; charset=utf-8',
+        'Content-Length': body.length,
+        'Cache-Control': 'public, max-age=86400',
         'X-Content-Type-Options': 'nosniff',
       })
       res.end(body)

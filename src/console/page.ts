@@ -3,12 +3,29 @@
  * separate asset keeps the package zero-dependency and means the published
  * `dist/` needs no build step beyond tsc.
  */
+
+/**
+ * The s3node mark: a hexagon ring around an isometric cube whose three visible
+ * faces are the letters N (top), S (left) and 3 (right). Same geometry as
+ * `assets/favicon.svg`; kept as one string so the header mark and the served
+ * favicon can never drift apart.
+ */
+const MARK_SHAPES = `<polygon points="256,46 436,150 436,358 256,462 76,358 76,150" fill="none" stroke-width="36"/>` +
+  `<polygon points="256.0,117.0 286.6,134.7 263.2,181.5 315.4,151.3 346.0,169.0 256.0,221.0 225.4,203.3 248.8,156.5 196.6,186.7 166.0,169.0"/>` +
+  `<polygon points="166.0,184.2 247.0,231.0 247.0,265.0 194.0,234.4 194.0,264.4 247.0,295.0 247.0,391.0 166.0,344.2 166.0,310.2 219.0,340.8 219.0,310.8 166.0,280.2"/>` +
+  `<polygon points="265.0,231.0 346.0,184.2 346.0,344.2 265.0,391.0 265.0,357.0 318.0,326.4 318.0,296.4 265.0,327.0 265.0,295.0 318.0,264.4 318.0,234.4 265.0,265.0"/>`
+
+/** Served at `/favicon.svg`. Fixed brand blue: a tab icon has no CSS context. */
+export const CONSOLE_FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="s3node">` +
+  `<g fill="#2563eb" stroke="#2563eb" stroke-width="3" stroke-linejoin="round">${MARK_SHAPES}</g></svg>`
+
 export const CONSOLE_HTML = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>s3node console</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <style>
   :root { color-scheme: light dark; --bg:#fff; --fg:#111; --muted:#666; --line:#e3e3e3; --accent:#2563eb; --danger:#b91c1c; }
   @media (prefers-color-scheme: dark) {
@@ -17,7 +34,10 @@ export const CONSOLE_HTML = `<!doctype html>
   * { box-sizing: border-box; }
   body { margin:0; font:14px/1.5 system-ui,-apple-system,Segoe UI,sans-serif; background:var(--bg); color:var(--fg); }
   header { display:flex; align-items:baseline; gap:12px; padding:14px 20px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
-  h1 { font-size:16px; margin:0; font-weight:600; }
+  h1 { font-size:16px; margin:0; font-weight:600; display:flex; align-items:center; gap:8px; }
+  /* The mark is inlined rather than linked so the page stays self-contained
+     under the console's CSP, and inherits the heading colour in both themes. */
+  .mark { width:20px; height:20px; color:var(--accent); flex:none; }
   .muted { color:var(--muted); font-size:12px; }
   main { display:grid; grid-template-columns:minmax(200px,260px) 1fr; gap:0; min-height:calc(100vh - 53px); }
   @media (max-width:720px) { main { grid-template-columns:1fr; } aside { border-right:0; border-bottom:1px solid var(--line); } }
@@ -43,7 +63,7 @@ export const CONSOLE_HTML = `<!doctype html>
 </head>
 <body>
 <header>
-  <h1>s3node</h1>
+  <h1><svg class="mark" viewBox="0 0 512 512" aria-hidden="true"><g fill="currentColor" stroke="currentColor" stroke-width="3" stroke-linejoin="round">${MARK_SHAPES}</g></svg>s3node</h1>
   <span class="muted" id="info">loading…</span>
 </header>
 <div id="error"></div>

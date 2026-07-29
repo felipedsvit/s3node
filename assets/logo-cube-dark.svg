@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-labelledby="s3node-title">
+  <title id="s3node-title">s3node</title>
+  <!-- Pointy-top hexagon ring around an isometric cube. The three visible cube
+       faces are the letters themselves: N on the top face, S on the left face,
+       3 on the right face. Each letter is carved out of its full face polygon
+       (side faces sheared skewY(+/-30), top face on the 30 deg isometric plane)
+       so the cube silhouette survives. Colour: dark mode. -->
+  <g fill="#93c5fd" stroke="#93c5fd" stroke-width="3" stroke-linejoin="round">
+    <polygon points="256,46 436,150 436,358 256,462 76,358 76,150" fill="none" stroke-width="36"/>
+    <polygon points="256.0,117.0 286.6,134.7 263.2,181.5 315.4,151.3 346.0,169.0 256.0,221.0 225.4,203.3 248.8,156.5 196.6,186.7 166.0,169.0"/>
+    <polygon points="166.0,184.2 247.0,231.0 247.0,265.0 194.0,234.4 194.0,264.4 247.0,295.0 247.0,391.0 166.0,344.2 166.0,310.2 219.0,340.8 219.0,310.8 166.0,280.2"/>
+    <polygon points="265.0,231.0 346.0,184.2 346.0,344.2 265.0,391.0 265.0,357.0 318.0,326.4 318.0,296.4 265.0,327.0 265.0,295.0 318.0,264.4 318.0,234.4 265.0,265.0"/>
+  </g>
+</svg>
