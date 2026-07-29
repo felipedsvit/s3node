@@ -1,6 +1,6 @@
 {
   "name": "@felipedsvit/s3node",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Embeddable, S3-compatible object storage server for Node.js",
   "type": "module",
   "main": "dist/src/index.js",
@@ -50,7 +50,7 @@
     "sigv4"
   ],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/felipedsvit/s3node.git"

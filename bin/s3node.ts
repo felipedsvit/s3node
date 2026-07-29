@@ -8,7 +8,7 @@ import { clusterSupported, defaultWorkerCount, runCluster } from '../src/cluster
 import { ConsoleServer } from '../src/console/server.js'
 import type { S3NodeServer } from '../src/server.js'
 
-const VERSION = '0.1.5'
+const VERSION = '0.1.6'
 
 const USAGE = `
 s3node — S3-compatible object storage server
