@@ -8,7 +8,7 @@ import { clusterSupported, defaultWorkerCount, runCluster } from '../src/cluster
 import { ConsoleServer } from '../src/console/server.js'
 import type { S3NodeServer } from '../src/server.js'
 
-const VERSION = '0.1.6'
+const VERSION = '0.1.8'
 
 const USAGE = `
 s3node — S3-compatible object storage server
@@ -119,6 +119,16 @@ async function start({ reusePort = false, withConsole = true, withLifecycle = tr
     reusePort,
     ...(withLifecycle ? {} : { lifecycleIntervalMs: 0 }),
   })
+
+  if (!values.quiet) {
+    server.http.on('request', (req, res) => {
+      const start = process.hrtime.bigint()
+      res.on('finish', () => {
+        const ms = Number(process.hrtime.bigint() - start) / 1e6
+        process.stdout.write(`[s3node] ${req.method} ${req.url} ${res.statusCode} ${ms.toFixed(1)}ms\n`)
+      })
+    })
+  }
 
   let adminConsole: ConsoleServer | null = null
   if (consolePort !== null && withConsole) {
