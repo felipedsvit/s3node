@@ -1,8 +1,13 @@
 import { S3Error } from '../errors.js'
+import { lookup } from 'node:dns/promises'
+import { request as httpRequest } from 'node:http'
+import { request as httpsRequest } from 'node:https'
+import { isIP } from 'node:net'
 import type { NotificationQueueRow } from '../storage/metadata.js'
 import { childNamed, childText, childrenNamed, document, parseXml, text } from '../xml.js'
 
 const DISPATCH_TIMEOUT_MS = 5000
+const MAX_TARGETS = 100
 
 const KNOWN_EVENTS = [
   's3:ObjectCreated:*',
@@ -59,6 +64,9 @@ export function parseNotificationXml(body: string | Buffer): NotificationConfig 
     if (url.protocol !== 'http:' && url.protocol !== 'https:') {
       throw new S3Error('MalformedXML', 'Webhook endpoints must be http or https')
     }
+    if (url.username || url.password) {
+      throw new S3Error('MalformedXML', 'Webhook endpoints must not contain credentials')
+    }
     const events = childrenNamed(node, 'Event').map((event) => event.text)
     if (events.length === 0) throw new S3Error('MalformedXML', 'Each WebhookConfiguration requires an Event')
     for (const event of events) {
@@ -68,6 +76,9 @@ export function parseNotificationXml(body: string | Buffer): NotificationConfig 
     }
     return { id: childText(node, 'Id') ?? `webhook-${index}`, endpoint, events, filter: parseFilter(node) }
   })
+  if (targets.length > MAX_TARGETS) {
+    throw new S3Error('MalformedXML', `A maximum of ${MAX_TARGETS} webhook targets is allowed`)
+  }
   return { targets }
 }
 
@@ -140,7 +151,7 @@ export interface NotificationConfigSource {
   metadata: {
     getConfig<T>(bucket: string, name: string): T | null
     enqueueNotification(row: { bucket: string; targetId: string; endpoint: string; payload: string; now: number }): void
-    claimDueNotifications(now: number, limit?: number): NotificationQueueRow[]
+    claimDueNotifications(now: number, limit?: number, leaseMs?: number): NotificationQueueRow[]
     rescheduleNotification(id: number, attempts: number, nextAttemptAt: number): void
     deadLetterNotification(id: number, attempts: number): void
     deleteNotification(id: number): void
@@ -163,6 +174,8 @@ export interface NotificationDispatcherOptions {
   maxBackoffMs?: number
   /** How often the background worker sweeps the queue for due deliveries. 0 disables the worker (drain() still works). */
   intervalMs?: number | undefined
+  /** Explicit opt-in for loopback/private webhook destinations. */
+  allowPrivateEndpoints?: boolean | undefined
 }
 
 const DEFAULT_MAX_ATTEMPTS = 6
@@ -188,11 +201,12 @@ export class NotificationDispatcher {
   maxBackoffMs: number
   inFlight: Set<Promise<void>>
   private timer: ReturnType<typeof setInterval> | null
+  private readonly allowPrivateEndpoints: boolean
 
   constructor(store: NotificationConfigSource, {
     region = 'us-east-1', logger = null, fetchImpl = fetch, now = Date.now,
     maxAttempts = DEFAULT_MAX_ATTEMPTS, baseBackoffMs = DEFAULT_BASE_BACKOFF_MS, maxBackoffMs = DEFAULT_MAX_BACKOFF_MS,
-    intervalMs = DEFAULT_INTERVAL_MS,
+    intervalMs = DEFAULT_INTERVAL_MS, allowPrivateEndpoints = false,
   }: NotificationDispatcherOptions = {}) {
     this.store = store
     this.region = region
@@ -203,6 +217,7 @@ export class NotificationDispatcher {
     this.baseBackoffMs = baseBackoffMs
     this.maxBackoffMs = maxBackoffMs
     this.inFlight = new Set()
+    this.allowPrivateEndpoints = allowPrivateEndpoints
     this.timer = intervalMs > 0
       ? setInterval(() => { this.processQueue().catch(() => {}) }, intervalMs)
       : null
@@ -248,30 +263,95 @@ export class NotificationDispatcher {
   }
 
   private _attempt(row: NotificationQueueRow): Promise<void> {
-    const promise: Promise<void> = (this.fetchImpl(row.endpoint, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-amz-event-source': 's3node' } as Record<string, string>,
-      body: row.payload,
-      signal: AbortSignal.timeout(DISPATCH_TIMEOUT_MS),
-    }) as Promise<Response>).then(() => {
+    const promise = this._deliver(row).finally(() => this.inFlight.delete(promise))
+    this.inFlight.add(promise)
+    return promise
+  }
+
+  private async _deliver(row: NotificationQueueRow): Promise<void> {
+    try {
+      const status = this.fetchImpl === fetch
+        ? await this._deliverPinned(row.endpoint, row.payload)
+        : await this._deliverInjected(row.endpoint, row.payload)
+      if (status < 200 || status >= 300) throw new Error(`Webhook returned HTTP ${status}`)
       this.store.metadata.deleteNotification(row.id)
-    }).catch((err: Error) => {
+    } catch (err) {
       const attempts = row.attempts + 1
       if (attempts >= this.maxAttempts) {
         this.store.metadata.deadLetterNotification(row.id, attempts)
         this.logger?.error?.({
-          message: 'notification moved to dead-letter', endpoint: row.endpoint, attempts, error: err.message,
+          message: 'notification moved to dead-letter', endpoint: row.endpoint, attempts, error: (err as Error).message,
         })
         return
       }
       const backoffMs = Math.min(this.baseBackoffMs * 2 ** row.attempts, this.maxBackoffMs)
       this.store.metadata.rescheduleNotification(row.id, attempts, this.now() + backoffMs)
       this.logger?.error?.({
-        message: 'notification delivery failed, retrying', endpoint: row.endpoint, attempts, error: err.message,
+        message: 'notification delivery failed, retrying', endpoint: row.endpoint, attempts, error: (err as Error).message,
       })
-    }).finally(() => this.inFlight.delete(promise)) as Promise<void>
-    this.inFlight.add(promise)
-    return promise
+    }
+  }
+
+  private async _deliverInjected(endpoint: string, payload: string): Promise<number> {
+    const response = await this.fetchImpl(endpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-amz-event-source': 's3node' } as Record<string, string>,
+      body: payload,
+      signal: AbortSignal.timeout(DISPATCH_TIMEOUT_MS),
+      redirect: 'error',
+    })
+    await response.body?.cancel().catch(() => {})
+    return response.status
+  }
+
+  /** Resolves once, validates every answer, then pins the actual connection to that result. */
+  private async _deliverPinned(endpoint: string, payload: string): Promise<number> {
+    const url = new URL(endpoint)
+    if (url.username || url.password) throw new Error('Webhook endpoints must not contain credentials')
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error('Webhook endpoints must use http or https')
+    if (!this.allowPrivateEndpoints && url.hostname.toLowerCase() === 'localhost') {
+      throw new Error('Private webhook endpoints are disabled')
+    }
+    const addresses = isIP(url.hostname)
+      ? [{ address: url.hostname, family: isIP(url.hostname) }]
+      : await lookup(url.hostname, { all: true, verbatim: true })
+    if (addresses.length === 0) throw new Error('Webhook endpoint did not resolve')
+    if (!this.allowPrivateEndpoints && addresses.some(({ address }) => isPrivateAddress(address))) {
+      throw new Error('Private webhook endpoints are disabled')
+    }
+    const selected = addresses[0]!
+    const body = Buffer.from(payload, 'utf8')
+
+    return new Promise<number>((resolve, reject) => {
+      const request = (url.protocol === 'https:' ? httpsRequest : httpRequest)(url, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'content-length': body.length,
+          'x-amz-event-source': 's3node',
+        },
+        // Pin DNS to the address that was validated above. HTTPS still uses
+        // the URL hostname for SNI and certificate verification.
+        lookup: ((_hostname: string, _options: unknown, callback: (...args: unknown[]) => void) => {
+          callback(null, selected.address, selected.family)
+        }) as never,
+      }, (response) => {
+        const status = response.statusCode ?? 0
+        response.destroy()
+        clearTimeout(deadline)
+        resolve(status)
+      })
+      const deadline = setTimeout(
+        () => request.destroy(new Error('Webhook delivery timed out')),
+        DISPATCH_TIMEOUT_MS,
+      )
+      deadline.unref?.()
+      request.once('error', (err) => {
+        clearTimeout(deadline)
+        reject(err)
+      })
+      request.end(body)
+    })
   }
 
   /** Runs one queue sweep and waits for everything it kicked off — used by tests and graceful shutdown. */
@@ -288,3 +368,26 @@ export class NotificationDispatcher {
 
 export { KNOWN_EVENTS }
 export type { NotificationQueueRow } from '../storage/metadata.js'
+
+function isPrivateAddress(address: string): boolean {
+  const normalized = address.toLowerCase()
+  // IPv4-mapped IPv6 addresses may be rendered in dotted or hexadecimal
+  // notation. Treat the entire mapped range as private here, then let callers
+  // explicitly opt in when private notification endpoints are intentional.
+  if (normalized.startsWith('::ffff:') && !/^::ffff:(\d+\.){3}\d+$/.test(normalized)) return true
+  if (normalized === '::1' || normalized === '::' || normalized.startsWith('fc') ||
+      normalized.startsWith('fd') || normalized.startsWith('fe8') || normalized.startsWith('fe9') ||
+      normalized.startsWith('fea') || normalized.startsWith('feb') || normalized.startsWith('ff') ||
+      normalized.startsWith('2001:db8:')) return true
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(normalized)?.[1]
+  const ipv4 = mapped ?? (isIP(normalized) === 4 ? normalized : null)
+  if (!ipv4) return false
+  const [a, b, c] = ipv4.split('.').map(Number)
+  return a === 0 || a === 10 || a === 127 || a! >= 224 ||
+    (a === 100 && b! >= 64 && b! <= 127) ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b! >= 16 && b! <= 31) ||
+    (a === 192 && (b === 0 || b === 2 || b === 168)) ||
+    (a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100))) ||
+    (a === 203 && b === 0 && c === 113)
+}

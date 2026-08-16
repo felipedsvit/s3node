@@ -18,6 +18,9 @@ export interface PutObjectInput {
   encryptionRequest?: SseRequest | null
   /** Object Lock state requested via headers; merged over the bucket default. */
   lock?: Partial<LockState> | null
+  /** Optional request-specific bounds, used by signed browser POST policies. */
+  minSize?: number | undefined
+  maxSize?: number | undefined
 }
 
 export interface PutObjectResult {
@@ -49,6 +52,7 @@ export interface CopyObjectInput {
   replaceTags: boolean
   sourceEncryptionRequest?: SseRequest | null
   encryptionRequest?: SseRequest | null
+  lock?: Partial<LockState> | null
 }
 
 export interface CopyObjectResult {
@@ -67,6 +71,7 @@ export interface CreateMultipartInput {
   metadata?: Record<string, string>
   tags?: Record<string, string>
   encryptionRequest?: SseRequest | null
+  lock?: Partial<LockState> | null
 }
 
 export interface CreateMultipartResult {

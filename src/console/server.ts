@@ -6,6 +6,7 @@ import type { CredentialStore } from '../auth/credentials.js'
 import { S3Error } from '../errors.js'
 import type { MetricsRegistry } from '../metrics.js'
 import type { ObjectStore } from '../storage/store.js'
+import { RateLimiter } from '../util/rateLimiter.js'
 import { CONSOLE_HTML, CONSOLE_FAVICON_SVG } from './page.js'
 
 /**
@@ -74,6 +75,7 @@ function required(params: URLSearchParams, name: string): string {
 export class ConsoleServer {
   readonly http: ReturnType<typeof createHttpServer>
   endpoint?: string
+  private readonly failedAuthLimiter = new RateLimiter(20, 5)
 
   constructor(private readonly options: ConsoleOptions) {
     this.http = createHttpServer((req, res) => {
@@ -112,6 +114,12 @@ export class ConsoleServer {
     }
 
     if (!authenticate(req, this.options.credentials)) {
+      const remote = req.socket.remoteAddress ?? 'unknown'
+      if (!this.failedAuthLimiter.allow(remote)) {
+        res.writeHead(429, { 'Content-Type': 'text/plain', 'Retry-After': '1' })
+        res.end('Too many authentication attempts\n')
+        return
+      }
       unauthorized(res)
       return
     }

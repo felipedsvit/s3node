@@ -100,6 +100,42 @@ describe('GarbageCollector', () => {
     assert.equal(stats.deleted, 0)
   })
 
+  it('does not collect a blob while a concurrent PUT is publishing its metadata', async () => {
+    const originalWrite = store.blobs.write.bind(store.blobs)
+    let announceWritten
+    let releaseWrite
+    const written = new Promise((resolve) => { announceWritten = resolve })
+    const release = new Promise((resolve) => { releaseWrite = resolve })
+    store.blobs.write = async (...args) => {
+      const result = await originalWrite(...args)
+      announceWritten(result)
+      await release
+      return result
+    }
+
+    const putting = store.putObject({ bucket: 'bkt', key: 'raced', body: body('survives') })
+    const staged = await written
+    const stats = await gc.collect()
+    assert.equal(stats.orphaned, 0)
+    await assert.doesNotReject(store.blobs.size(staged.blobId))
+
+    releaseWrite()
+    await putting
+    const record = store.getObject('bkt', 'raced')
+    await assert.doesNotReject(store.blobs.size(record.blobId))
+  })
+
+  it('only reclaims abandoned pending reservations with an explicit safe age', async () => {
+    const { blobId } = await store.blobs.write(body('abandoned'), { algorithms: ['md5'] })
+    store.metadata.reserveBlob(blobId)
+    store.metadata.db.prepare('UPDATE pending_blobs SET created_at = ? WHERE blob_id = ?')
+      .run(Date.now() - 2 * 3600_000, blobId)
+
+    assert.equal((await gc.collect()).deleted, 0)
+    assert.equal((await gc.collect({ stalePendingBlobAgeMs: 3600_000 })).deleted, 1)
+    await assert.rejects(store.blobs.size(blobId))
+  })
+
   it('scan is read-only and returns correct counts', async () => {
     await store.putObject({ bucket: 'bkt', key: 'k', body: body('data') })
     const { blobId } = await store.blobs.write(Readable.from([Buffer.from('orphan')]), { algorithms: ['md5'] })

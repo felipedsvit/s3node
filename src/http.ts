@@ -23,6 +23,19 @@ export function isoDate(date: Date): string {
   return date.toISOString()
 }
 
+/** Removes temporary SigV4 credentials from URLs before they reach logs. */
+export function redactUrlForLog(rawUrl: string | undefined): string | undefined {
+  if (!rawUrl) return rawUrl
+  const queryStart = rawUrl.indexOf('?')
+  if (queryStart === -1) return rawUrl
+  const path = rawUrl.slice(0, queryStart)
+  const params = new URLSearchParams(rawUrl.slice(queryStart + 1))
+  for (const name of ['X-Amz-Signature', 'X-Amz-Credential', 'X-Amz-Security-Token']) {
+    if (params.has(name)) params.set(name, '[REDACTED]')
+  }
+  return `${path}?${params.toString()}`
+}
+
 function safeDecode(value: string): string {
   try {
     return decodeURIComponent(value)

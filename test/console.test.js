@@ -65,6 +65,13 @@ describe('console authentication', () => {
   it('accepts any configured credential', async () => {
     assert.equal((await call('/api/buckets', { credential: OTHER_CREDENTIAL })).status, 200)
   })
+
+  it('rate-limits repeated failed authentication attempts', async () => {
+    const responses = await Promise.all(Array.from({ length: 30 }, () =>
+      call('/api/buckets', { credential: null })))
+    assert.equal(responses.some((response) => response.status === 429), true)
+    assert.equal((await call('/api/buckets', { credential: CREDENTIAL })).status, 200)
+  })
 })
 
 describe('console UI', () => {

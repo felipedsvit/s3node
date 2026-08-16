@@ -3,7 +3,7 @@ import { BucketMetadata } from './metadata/buckets.js'
 import { MultipartMetadata } from './metadata/multipart.js'
 import { NotificationMetadata } from './metadata/notifications.js'
 import { ObjectMetadata } from './metadata/objects.js'
-import { migrateV1ToV2, migrateV2ToV3, NULL_VERSION, SCHEMA, SCHEMA_VERSION } from './metadata/schema.js'
+import { migrateV1ToV2, migrateV2ToV3, migrateV4ToV5, migrateV5ToV6, NULL_VERSION, SCHEMA, SCHEMA_VERSION } from './metadata/schema.js'
 import type { BucketRecord, ListObjectsResult, ListVersionsResult, NotificationQueueRow, ObjectInput, ObjectRecord, PartRecord, UploadRecord } from './metadata/types.js'
 
 export { NULL_VERSION, SCHEMA_VERSION }
@@ -19,14 +19,35 @@ export class MetadataStore {
   constructor(path: string, { bucketCacheSize = 1024, configCacheSize = 4096, cacheTtlMs = 60000 } = {}) {
     this.db = new DatabaseSync(path)
     this.db.exec('PRAGMA journal_mode = WAL')
-    this.db.exec('PRAGMA synchronous = NORMAL')
+    this.db.exec('PRAGMA synchronous = FULL')
     this.db.exec('PRAGMA busy_timeout = 5000')
     this.db.exec('PRAGMA foreign_keys = ON')
 
-    migrateV1ToV2(this.db)
-    this.db.exec(SCHEMA)
-    migrateV2ToV3(this.db)
-    this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
+    const versionRow = this.db.prepare('PRAGMA user_version').get() as Record<string, number>
+    const version = Number(versionRow['user_version'] ?? 0)
+    if (version > SCHEMA_VERSION) {
+      this.db.close()
+      throw new Error(`metadata schema ${version} is newer than supported schema ${SCHEMA_VERSION}`)
+    }
+
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      migrateV1ToV2(this.db)
+      this.db.exec(SCHEMA)
+      migrateV2ToV3(this.db)
+      migrateV4ToV5(this.db)
+      migrateV5ToV6(this.db)
+      // Re-run after ALTER so new databases and upgrades converge on all current tables/indexes.
+      this.db.exec(SCHEMA)
+      this.db.exec(
+        'UPDATE metadata_sequence SET value = MAX(value, (SELECT COALESCE(MAX(sequence), 0) FROM objects)) WHERE id = 1')
+      this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
+      this.db.exec('COMMIT')
+    } catch (err) {
+      try { this.db.exec('ROLLBACK') } catch { /* already rolled back */ }
+      this.db.close()
+      throw err
+    }
 
     this.buckets = new BucketMetadata(this.db, { bucketCacheSize, configCacheSize, cacheTtlMs })
     this.notifications = new NotificationMetadata(this.db)
@@ -99,8 +120,8 @@ export class MetadataStore {
     this.notifications.enqueueNotification(event)
   }
 
-  claimDueNotifications(now: number, limit = 100): NotificationQueueRow[] {
-    return this.notifications.claimDueNotifications(now, limit)
+  claimDueNotifications(now: number, limit = 100, leaseMs = 30_000): NotificationQueueRow[] {
+    return this.notifications.claimDueNotifications(now, limit, leaseMs)
   }
 
   rescheduleNotification(id: number, attempts: number, nextAttemptAt: number): void {
@@ -217,11 +238,26 @@ export class MetadataStore {
     const ids = new Set<string>()
     for (const id of this.objects.allBlobIds()) ids.add(id)
     for (const id of this.multipart.allUploadPartBlobIds()) ids.add(id)
+    for (const row of this.db.prepare('SELECT blob_id FROM pending_blobs').all() as { blob_id: string }[]) {
+      ids.add(row.blob_id)
+    }
     return ids
   }
 
-  putPart(input: Parameters<MultipartMetadata['putPart']>[0]): void {
-    this.multipart.putPart(input)
+  reserveBlob(blobId: string): void {
+    this.db.prepare('INSERT INTO pending_blobs (blob_id, created_at) VALUES (?, ?)').run(blobId, Date.now())
+  }
+
+  releasePendingBlob(blobId: string): void {
+    this.db.prepare('DELETE FROM pending_blobs WHERE blob_id = ?').run(blobId)
+  }
+
+  releasePendingBlobsCreatedBefore(cutoff: number): number {
+    return (this.db.prepare('DELETE FROM pending_blobs WHERE created_at < ?').run(cutoff) as { changes: number }).changes
+  }
+
+  putPart(input: Parameters<MultipartMetadata['putPart']>[0]): boolean {
+    return this.multipart.putPart(input)
   }
 
   getPart(uploadId: string, partNumber: number): PartRecord | null {

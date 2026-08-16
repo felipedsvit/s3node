@@ -21,10 +21,14 @@ export class BucketMetadata {
   private statements: BucketStatements
   private bucketCache: LRUCache<string, BucketRecord | null>
   private configCache: LRUCache<string, unknown>
+  private dataVersion: number
+  private readonly readDataVersion: ReturnType<DatabaseSync['prepare']>
 
   constructor(db: DatabaseSync, { bucketCacheSize = 1024, configCacheSize = 4096, cacheTtlMs = 60000 } = {}) {
     this.bucketCache = new LRUCache<string, BucketRecord | null>(bucketCacheSize, cacheTtlMs)
     this.configCache = new LRUCache<string, unknown>(configCacheSize, cacheTtlMs)
+    this.readDataVersion = db.prepare('PRAGMA data_version')
+    this.dataVersion = this._currentDataVersion()
 
     this.statements = {
       createBucket: db.prepare('INSERT INTO buckets (name, created_at, region) VALUES (?, ?, ?)'),
@@ -45,12 +49,27 @@ export class BucketMetadata {
     }
   }
 
+  private _currentDataVersion(): number {
+    const row = this.readDataVersion.get() as Record<string, number>
+    return Number(row['data_version'] ?? 0)
+  }
+
+  /** SQLite increments data_version when another connection commits. */
+  private _refreshExternalChanges(): void {
+    const current = this._currentDataVersion()
+    if (current === this.dataVersion) return
+    this.dataVersion = current
+    this.bucketCache.clear()
+    this.configCache.clear()
+  }
+
   createBucket(name: string, region: string): void {
     this.statements.createBucket.run(name, Date.now(), region)
     this.bucketCache.delete(name)
   }
 
   getBucket(name: string): BucketRecord | null {
+    this._refreshExternalChanges()
     const cached = this.bucketCache.get(name)
     if (cached !== undefined) return cached
     const row = this.statements.getBucket.get(name) as unknown as BucketRow | undefined
@@ -87,6 +106,7 @@ export class BucketMetadata {
    * expects, because only the caller knows which parser produced the document.
    */
   getConfig<T = Record<string, unknown>>(bucket: string, name: string): T | null {
+    this._refreshExternalChanges()
     const cacheKey = `${bucket}\x00${name}`
     const cached = this.configCache.get(cacheKey) as T | null | undefined
     if (cached !== undefined) return cached as T | null

@@ -1,0 +1,37 @@
+# Changelog
+
+All notable changes to s3node are documented here. The project follows semantic versioning while the public API remains in the `0.x` development series.
+
+## Unreleased
+
+## 0.1.9 - 2026-08-16
+
+### Security
+
+- Authorize the source object for `CopyObject` and `UploadPartCopy`, authorize every key in bulk deletes, and require `s3:BypassGovernanceRetention` before bypassing governance retention.
+- Redact SigV4 credentials and signatures from logs and stop logging canonical signing material.
+- Block loopback, private, link-local, reserved, and redirecting webhook destinations by default to reduce SSRF risk. Trusted private endpoints require an explicit opt-in.
+- Validate browser POST size bounds and redirect targets before publishing an object, and enforce the 2 KiB user-metadata limit.
+
+### Durability and correctness
+
+- Upgrade metadata to schema v6 with transactional migrations, forward-version rejection, durable blob reservations, cross-connection sequence allocation, and cache invalidation.
+- Use full SQLite synchronization and co-located atomic blob staging so crashes cannot expose metadata that points to missing data.
+- Create the SSE-S3 master key atomically, reject malformed persisted keys, and document that `metadata.sqlite` and `master.key` must be backed up together.
+- Preserve Object Lock settings across copies and multipart uploads, reject past retention dates, and prevent disabling Object Lock or suspending its required versioning.
+- Recover notification deliveries abandoned by crashed workers, treat only 2xx responses as success, and cap notification configurations at 100 targets per bucket.
+
+### Operations
+
+- Add bounded write concurrency, request rate limits, request/header/socket timeouts, forced graceful shutdown, and strict numeric option validation.
+- Add CLI flags for write limits, rate limits, timeouts, and private notification endpoints; cluster workers now share generated credentials and divide aggregate rate limits.
+- Raise the minimum runtime to Node.js 22.13.0, where `node:sqlite` no longer needs an experimental flag.
+- Publish an explicit conditional export map with TypeScript declarations.
+
+### Tests and documentation
+
+- Expand coverage for CLI validation, log redaction, metadata migrations, concurrent metadata access, storage GC, notification delivery, policies, Object Lock, encryption, and cluster startup.
+- Refresh the README, security policy, architecture, CLI, configuration, storage, testing, and operational documentation.
+
+[0.1.9]: https://github.com/felipedsvit/s3node/releases/tag/v0.1.9
+[previous releases]: https://github.com/felipedsvit/s3node/releases

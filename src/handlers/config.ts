@@ -31,6 +31,10 @@ export async function putBucketVersioning(ctx: RequestContext, res: ServerRespon
     throw new S3Error('IllegalVersioningConfigurationException',
       'The versioning status must be Enabled or Suspended')
   }
+  const lock = store.getBucketConfig<ObjectLockConfig>(ctx.bucket, 'object-lock')
+  if (status === 'Suspended' && lock?.enabled) {
+    throw new S3Error('InvalidBucketState', 'Versioning cannot be suspended while Object Lock is enabled')
+  }
   store.putBucketConfig(ctx.bucket, 'versioning', { status })
   sendEmpty(ctx, res, 200)
 }
@@ -137,6 +141,9 @@ export async function putBucketObjectLock(ctx: RequestContext, res: ServerRespon
     throw new S3Error('InvalidBucketState', 'Object Lock requires versioning to be enabled')
   }
   const config = parseObjectLockConfigXml(await collectBody(ctx.bodyStreams))
+  if (!config.enabled) {
+    throw new S3Error('InvalidRequest', 'Object Lock cannot be disabled once configured')
+  }
   store.putBucketConfig(ctx.bucket, 'object-lock', config)
   sendEmpty(ctx, res, 200)
 }

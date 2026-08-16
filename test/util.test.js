@@ -237,7 +237,7 @@ describe('BufferPool', () => {
 
 describe('RateLimiter', () => {
   it('allows bursts up to capacity, then throttles', () => {
-    const limiter = new RateLimiter(3, 1000)
+    const limiter = new RateLimiter(3, 0.001)
     assert.equal(limiter.allow('a'), true)
     assert.equal(limiter.allow('a'), true)
     assert.equal(limiter.allow('a'), true)
@@ -253,7 +253,7 @@ describe('RateLimiter', () => {
   })
 
   it('tracks each key independently', () => {
-    const limiter = new RateLimiter(1, 1)
+    const limiter = new RateLimiter(1, 0.001)
     assert.equal(limiter.allow('a'), true)
     assert.equal(limiter.allow('b'), true)
     assert.equal(limiter.allow('a'), false)

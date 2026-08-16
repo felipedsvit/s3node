@@ -75,6 +75,52 @@ describe('notification queue', () => {
     assert.equal(queueRows(metadata).length, 0)
   })
 
+  it('treats a non-2xx webhook response as a failed delivery', async () => {
+    const dispatcher = new NotificationDispatcher({ metadata }, {
+      fetchImpl: async () => new Response('failed', { status: 500 }),
+      intervalMs: 0,
+      baseBackoffMs: 10,
+    })
+    dispatcher.dispatch({ bucket: 'bkt', eventName: 'ObjectCreated:Put', key: 'a' })
+    await dispatcher.processQueue()
+
+    const [row] = queueRows(metadata)
+    assert.equal(row.status, 'pending')
+    assert.equal(row.attempts, 1)
+  })
+
+  it('reclaims a row whose worker died while holding its delivery lease', async () => {
+    let now = 1000
+    let calls = 0
+    const dispatcher = new NotificationDispatcher({ metadata }, {
+      fetchImpl: async () => { calls++; return new Response(null, { status: 204 }) },
+      now: () => now,
+      intervalMs: 0,
+    })
+    dispatcher.dispatch({ bucket: 'bkt', eventName: 'ObjectCreated:Put', key: 'a' })
+    assert.equal(metadata.claimDueNotifications(now).length, 1)
+    assert.equal(queueRows(metadata)[0].status, 'in-flight')
+
+    now += 30_001
+    await dispatcher.processQueue()
+    assert.equal(calls, 1)
+    assert.equal(queueRows(metadata).length, 0)
+  })
+
+  it('blocks loopback webhook destinations unless explicitly allowed', async () => {
+    metadata.putConfig('bkt', 'notification', notificationConfig('http://127.0.0.1:9/hook'))
+    const errors = []
+    const dispatcher = new NotificationDispatcher({ metadata }, {
+      intervalMs: 0,
+      logger: { error: (entry) => errors.push(entry) },
+    })
+    dispatcher.dispatch({ bucket: 'bkt', eventName: 'ObjectCreated:Put', key: 'a' })
+    await dispatcher.processQueue()
+
+    assert.equal(queueRows(metadata)[0].attempts, 1)
+    assert.match(String(errors[0].error), /Private webhook endpoints are disabled/)
+  })
+
   it('moves an event to dead-letter after exceeding maxAttempts, and stops retrying it', async () => {
     let now = 0
     let calls = 0

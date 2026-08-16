@@ -89,6 +89,16 @@ export class ObjectStore {
   }
 
   static async open(options: OpenOptions): Promise<ObjectStore> {
+    for (const [name, value] of [
+      ['minPartSize', options.minPartSize],
+      ['maxObjectSize', options.maxObjectSize],
+      ['maxConcurrentUploads', options.maxConcurrentUploads],
+      ['maxConcurrentWrites', options.maxConcurrentWrites],
+    ] as const) {
+      if (value !== undefined && (!Number.isSafeInteger(value) || value < 0)) {
+        throw new TypeError(`${name} must be a non-negative safe integer`)
+      }
+    }
     await mkdir(options.dataDir, { recursive: true })
     const blobs = new BlobStore(options.dataDir)
     await blobs.init()

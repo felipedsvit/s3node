@@ -6,6 +6,7 @@ import { MAX_DELETE_KEYS, integerParam, maybeEncode, ownerXml } from './shared.j
 import { notify } from './shared.js'
 import type { ObjectStore } from '../storage/store.js'
 import type { S3NodeServer } from '../server.js'
+import { objectArn } from '../features/policy.js'
 
 export async function createBucket(ctx: RequestContext, res: ServerResponse, { store }: { store: ObjectStore }): Promise<void> {
   await collectBody(ctx.bodyStreams).catch(() => Buffer.alloc(0))
@@ -163,6 +164,7 @@ export async function deleteObjects(ctx: RequestContext, res: ServerResponse, { 
 
   const deleted: { key: string; versionId?: string; deleteMarker?: boolean }[] = []
   const errors: { key: string; code: string; message: string }[] = []
+  const bypassGovernance = String(ctx.headers['x-amz-bypass-governance-retention'] ?? '').toLowerCase() === 'true'
   for (const entry of entries) {
     const key = childText(entry, 'Key')
     if (!key) {
@@ -171,7 +173,11 @@ export async function deleteObjects(ctx: RequestContext, res: ServerResponse, { 
     }
     const versionId = childText(entry, 'VersionId')
     try {
-      const result = await store.deleteObject(ctx.bucket, key, versionId ?? null)
+      server.authorize(ctx, 's3:DeleteObject', objectArn(ctx.bucket, key))
+      if (bypassGovernance) {
+        server.authorize(ctx, 's3:BypassGovernanceRetention', objectArn(ctx.bucket, key))
+      }
+      const result = await store.deleteObject(ctx.bucket, key, versionId ?? null, { bypassGovernance })
       deleted.push({ key, ...result })
       notify(server, {
         bucket: ctx.bucket,

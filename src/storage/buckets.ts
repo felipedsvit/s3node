@@ -14,15 +14,22 @@ export class BucketService {
 
   createBucket(name: string): void {
     validateBucketName(name)
-    if (this.ctx.metadata.getBucket(name)) throw new S3Error('BucketAlreadyOwnedByYou')
-    this.ctx.metadata.createBucket(name, this.ctx.region)
+    this.ctx.metadata.transaction(() => {
+      if (this.ctx.metadata.getBucket(name)) throw new S3Error('BucketAlreadyOwnedByYou')
+      this.ctx.metadata.createBucket(name, this.ctx.region)
+    })
   }
 
   async deleteBucket(name: string): Promise<void> {
-    this.requireBucket(name)
-    if (!this.ctx.metadata.isBucketEmpty(name)) throw new S3Error('BucketNotEmpty')
-    const orphans = this.ctx.metadata.blobsInBucket(name)
-    this.ctx.metadata.deleteBucket(name)
+    let orphans: string[] = []
+    this.ctx.metadata.transaction(() => {
+      this.requireBucket(name)
+      if (!this.ctx.metadata.isBucketEmpty(name) || this.ctx.metadata.uploadCount(name) > 0) {
+        throw new S3Error('BucketNotEmpty')
+      }
+      orphans = this.ctx.metadata.blobsInBucket(name)
+      this.ctx.metadata.deleteBucket(name)
+    })
     await this.ctx.blobs.removeMany(orphans)
   }
 
@@ -41,13 +48,17 @@ export class BucketService {
   }
 
   putBucketConfig(bucket: string, name: string, value: unknown): void {
-    this.requireBucket(bucket)
-    this.ctx.metadata.putConfig(bucket, name, value)
+    this.ctx.metadata.transaction(() => {
+      this.requireBucket(bucket)
+      this.ctx.metadata.putConfig(bucket, name, value)
+    })
   }
 
   deleteBucketConfig(bucket: string, name: string): void {
-    this.requireBucket(bucket)
-    this.ctx.metadata.deleteConfig(bucket, name)
+    this.ctx.metadata.transaction(() => {
+      this.requireBucket(bucket)
+      this.ctx.metadata.deleteConfig(bucket, name)
+    })
   }
 
   bucketVersioning(bucket: string): string {

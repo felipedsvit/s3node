@@ -4,7 +4,7 @@ This guide walks you through running s3node for the first time, creating a bucke
 
 ## Prerequisites
 
-- **Node.js 22.5 or newer** (22.12+ for cluster mode)
+- **Node.js 22.13 or newer**
 - No Docker, no containers, no Go runtime needed
 
 ## Run with npx

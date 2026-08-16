@@ -10,6 +10,8 @@ import {
 } from './shared.js'
 import type { ObjectStore } from '../storage/store.js'
 import type { S3NodeServer } from '../server.js'
+import { objectArn } from '../features/policy.js'
+import { lockFromHeaders } from '../features/objectlock.js'
 
 export function createMultipartUpload(ctx: RequestContext, res: ServerResponse, { store }: { store: ObjectStore }): void {
   const { uploadId, encryption } = store.createMultipartUpload({
@@ -19,6 +21,7 @@ export function createMultipartUpload(ctx: RequestContext, res: ServerResponse, 
     metadata: userMetadata(ctx.headers as Record<string, string | string[] | undefined>),
     tags: parseTaggingHeader(ctx.headers['x-amz-tagging'] as string | undefined),
     encryptionRequest: sseRequest(ctx, store),
+    lock: lockFromHeaders(ctx.headers as Record<string, string | string[] | undefined>),
   })
   sendXml(ctx, res, 200, document('InitiateMultipartUploadResult',
     text('Bucket', ctx.bucket) + text('Key', ctx.key) + text('UploadId', uploadId)),
@@ -53,8 +56,9 @@ function parseCopySourceRange(header: string | string[] | undefined): { start: n
   return { start: Number.parseInt(match[1]!, 10), end: Number.parseInt(match[2]!, 10) }
 }
 
-export async function uploadPartCopy(ctx: RequestContext, res: ServerResponse, { store }: { store: ObjectStore }): Promise<void> {
+export async function uploadPartCopy(ctx: RequestContext, res: ServerResponse, { store, server }: { store: ObjectStore; server: S3NodeServer }): Promise<void> {
   const source = parseCopySource(ctx.headers['x-amz-copy-source'])
+  server.authorize(ctx, 's3:GetObject', objectArn(source.bucket, source.key), {}, source.bucket)
   const result = await store.uploadPartCopy({
     bucket: ctx.bucket,
     key: ctx.key,

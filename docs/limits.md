@@ -24,7 +24,7 @@ In cluster mode, SQLite WAL allows concurrent reads but serializes writes. The m
 | Limit | Default | Configurable |
 |-------|---------|-------------|
 | Max multipart uploads | 1000 | `maxConcurrentUploads` |
-| Max blob writes | unlimited | `maxConcurrentWrites` |
+| Max blob writes | 64 | `maxConcurrentWrites` (`0` disables the limit) |
 
 ## Comparison with alternatives
 

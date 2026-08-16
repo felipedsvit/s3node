@@ -1,5 +1,6 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, timingSafeEqual } from 'node:crypto'
-import { readFile, writeFile } from 'node:fs/promises'
+import { link, open, readFile, rm } from 'node:fs/promises'
+import { dirname } from 'node:path'
 import { Transform, type TransformCallback } from 'node:stream'
 import { S3Error } from '../errors.js'
 
@@ -68,21 +69,65 @@ export class EncryptionManager {
 
   static async load(path: string, provided: string | Buffer | null = null): Promise<EncryptionManager> {
     if (provided) {
-      const key = Buffer.isBuffer(provided) ? provided : Buffer.from(provided, 'base64')
+      const key = Buffer.isBuffer(provided) ? Buffer.from(provided) : Buffer.from(provided, 'base64')
       if (key.length !== KEY_BYTES) {
         throw new TypeError(`encryptionMasterKey must be ${KEY_BYTES} bytes`)
       }
       return new EncryptionManager(key)
     }
-    try {
-      const stored = Buffer.from(await readFile(path, 'utf8'), 'base64')
-      if (stored.length === KEY_BYTES) return new EncryptionManager(stored)
-    } catch {
-      // Fall through and generate one.
+    const readStored = async (): Promise<Buffer | null> => {
+      let encoded: string
+      try {
+        encoded = (await readFile(path, 'utf8')).trim()
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null
+        throw err
+      }
+      const stored = Buffer.from(encoded, 'base64')
+      if (stored.length !== KEY_BYTES || stored.toString('base64') !== encoded) {
+        throw new Error(`Invalid SSE-S3 master key at ${path}; refusing to replace it`)
+      }
+      return stored
     }
+
+    const existing = await readStored()
+    if (existing) return new EncryptionManager(existing)
+
     const key = randomBytes(KEY_BYTES)
-    await writeFile(path, key.toString('base64'), { mode: 0o600 })
-    return new EncryptionManager(key)
+    const tmpPath = `${path}.tmp-${process.pid}-${randomBytes(8).toString('hex')}`
+    try {
+      const handle = await open(tmpPath, 'wx', 0o600)
+      try {
+        await handle.writeFile(key.toString('base64'), 'utf8')
+        await handle.sync()
+      } finally {
+        await handle.close()
+      }
+      try {
+        await link(tmpPath, path)
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err
+      } finally {
+        await rm(tmpPath, { force: true }).catch(() => {})
+      }
+
+      // Persist the directory entry before any encrypted object can be committed.
+      let directory: Awaited<ReturnType<typeof open>> | null = null
+      try {
+        directory = await open(dirname(path), 'r')
+        await directory.sync()
+      } catch {
+        // Some platforms do not support directory fsync.
+      } finally {
+        await directory?.close().catch(() => {})
+      }
+
+      const winner = await readStored()
+      if (!winner) throw new Error(`Failed to initialize SSE-S3 master key at ${path}`)
+      return new EncryptionManager(winner)
+    } finally {
+      key.fill(0)
+    }
   }
 
   parseRequest(headers: Record<string, string | string[] | undefined>, { prefix = 'x-amz-server-side-encryption' } = {}): SseRequest | null {

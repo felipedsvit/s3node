@@ -39,6 +39,9 @@ export interface UploadRecord {
   metadata: Record<string, string>
   tags: Record<string, string>
   encryption: EncryptionContext | null
+  retentionMode: string | null
+  retainUntil: Date | null
+  legalHold: boolean
 }
 
 export interface PartRecord {
@@ -167,6 +170,9 @@ export interface UploadRow {
   metadata: string | null
   tags: string | null
   encryption: string | null
+  retention_mode: string | null
+  retain_until: number | null
+  legal_hold: number
 }
 
 export interface ListObjectsResult {

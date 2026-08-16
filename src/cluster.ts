@@ -66,8 +66,11 @@ export async function runCluster(options: ClusterOptions): Promise<void> {
     stopping = true
     try {
       await options.stop?.()
+    } catch (err) {
+      options.log?.(`worker ${process.pid} shutdown failed: ${(err as Error).message}`)
+      process.exitCode = 1
     } finally {
-      process.exit(0)
+      process.exit(process.exitCode ?? 0)
     }
   }
   process.on('SIGTERM', () => { void shutdown() })
@@ -82,6 +85,7 @@ function supervise({ workers = defaultWorkerCount(), log = () => {} }: ClusterOp
   log(`primary ${process.pid} starting ${count} worker${count === 1 ? '' : 's'}`)
 
   let shuttingDown = false
+  let recentCrashes: number[] = []
   // Worker id -> our stable slot number. The slot decides which worker owns the
   // lifecycle sweep, so a replacement has to inherit the slot of the worker it
   // replaces rather than get a fresh one.
@@ -98,8 +102,17 @@ function supervise({ workers = defaultWorkerCount(), log = () => {} }: ClusterOp
     const slot = slots.get(worker.id) ?? 1
     slots.delete(worker.id)
     if (shuttingDown) return
+    const now = Date.now()
+    recentCrashes = recentCrashes.filter((at) => now - at < 30_000)
+    recentCrashes.push(now)
+    if (recentCrashes.length >= Math.max(5, count * 3)) {
+      log(`cluster restart limit exceeded; shutting down after ${recentCrashes.length} crashes in 30s`)
+      process.exitCode = 1
+      stopAll()
+      return
+    }
     log(`worker ${worker.process.pid} exited (${signal ?? code}); restarting`)
-    spawn(slot)
+    setTimeout(() => { if (!shuttingDown) spawn(slot) }, Math.min(1000, recentCrashes.length * 100))
   })
 
   const stopAll = (): void => {

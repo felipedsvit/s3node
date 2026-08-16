@@ -1,5 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite'
 import type { EncryptionContext } from '../../features/encryption.js'
+import type { LockState } from '../../features/objectlock.js'
 import { toKeyBuffer } from '../../util/bytes.js'
 import type { CountRow, PartRecord, PartRow, UploadRecord, UploadRow } from './types.js'
 
@@ -26,8 +27,8 @@ export class MultipartMetadata {
   constructor(db: DatabaseSync) {
     this.statements = {
       createUpload: db.prepare(
-        'INSERT INTO uploads (upload_id, bucket, key, initiated_at, content_type, metadata, tags, encryption) ' +
-        'VALUES (?, ?, ?, ?, ?, ?, ?, ?)'),
+        'INSERT INTO uploads (upload_id, bucket, key, initiated_at, content_type, metadata, tags, encryption, retention_mode, retain_until, legal_hold) ' +
+        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'),
       getUpload: db.prepare('SELECT * FROM uploads WHERE upload_id = ?'),
       deleteUpload: db.prepare('DELETE FROM uploads WHERE upload_id = ?'),
       listUploads: db.prepare(
@@ -38,7 +39,9 @@ export class MultipartMetadata {
 
       putPart: db.prepare(`
         INSERT INTO upload_parts (upload_id, part_number, size, etag, blob_id, uploaded_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        SELECT ?, ?, ?, ?, ?, ? WHERE EXISTS (
+          SELECT 1 FROM uploads WHERE upload_id = ?
+        )
         ON CONFLICT (upload_id, part_number) DO UPDATE SET
           size = excluded.size, etag = excluded.etag,
           blob_id = excluded.blob_id, uploaded_at = excluded.uploaded_at`),
@@ -51,7 +54,7 @@ export class MultipartMetadata {
     }
   }
 
-  createUpload({ uploadId, bucket, key, contentType, metadata, tags, encryption }: {
+  createUpload({ uploadId, bucket, key, contentType, metadata, tags, encryption, lock }: {
     uploadId: string
     bucket: string
     key: string
@@ -59,6 +62,7 @@ export class MultipartMetadata {
     metadata?: Record<string, string>
     tags?: Record<string, string>
     encryption?: EncryptionContext | null
+    lock?: Partial<LockState> | null
   }): void {
     this.statements.createUpload.run(
       uploadId, bucket, toKeyBuffer(key), Date.now(),
@@ -66,6 +70,9 @@ export class MultipartMetadata {
       metadata && Object.keys(metadata).length ? JSON.stringify(metadata) : null,
       tags && Object.keys(tags).length ? JSON.stringify(tags) : null,
       encryption ? JSON.stringify(encryption) : null,
+      lock?.retentionMode ?? null,
+      lock?.retainUntil?.getTime() ?? null,
+      lock?.legalHold ? 1 : 0,
     )
   }
 
@@ -80,6 +87,9 @@ export class MultipartMetadata {
       metadata: row.metadata ? JSON.parse(row.metadata) : {},
       tags: row.tags ? JSON.parse(row.tags) : {},
       encryption: row.encryption ? JSON.parse(row.encryption) : null,
+      retentionMode: row.retention_mode ?? null,
+      retainUntil: row.retain_until == null ? null : new Date(row.retain_until),
+      legalHold: Boolean(row.legal_hold),
     }
   }
 
@@ -115,8 +125,10 @@ export class MultipartMetadata {
     size: number
     etag: string
     blobId: string
-  }): void {
-    this.statements.putPart.run(uploadId, partNumber, size, etag, blobId, Date.now())
+  }): boolean {
+    return (this.statements.putPart.run(
+      uploadId, partNumber, size, etag, blobId, Date.now(), uploadId,
+    ) as { changes: number }).changes > 0
   }
 
   getPart(uploadId: string, partNumber: number): PartRecord | null {

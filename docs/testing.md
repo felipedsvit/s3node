@@ -1,6 +1,6 @@
 # Testing
 
-s3node has 301+ unit and HTTP-level integration tests, plus an interoperability suite that drives the real AWS SDK against the server.
+s3node has 402 unit and HTTP-level integration tests, plus an interoperability suite that drives the real AWS SDK against the server.
 
 ## Running tests
 

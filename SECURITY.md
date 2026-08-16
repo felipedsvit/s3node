@@ -51,6 +51,14 @@ The admin console uses **HTTP Basic Auth** (Base64-encoded credentials in the `A
 
 S3 API operations use **AWS SigV4** signature verification (request body signed, not encrypted).
 
+### Webhook destinations
+
+Notification delivery rejects loopback, private, link-local, and redirecting endpoints by default to reduce server-side request forgery risk. Private endpoints require an explicit operator opt-in and should only be used on a trusted network.
+
+### Key backup
+
+SSE-S3 depends on `<dataDir>/master.key`. Back it up and restore it atomically with the metadata database. The server refuses to replace a malformed key, because generating a new one would make existing encrypted data unreadable.
+
 ## Security Scanning
 
 Code is scanned with:

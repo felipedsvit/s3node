@@ -434,6 +434,55 @@ describe('maxConcurrentWrites', () => {
   })
 })
 
+describe('multi-connection metadata consistency', () => {
+  it('invalidates cached bucket configuration after another connection commits', async () => {
+    const dataDir = await mkdtemp(join(root, 'metadata-cache-'))
+    const path = join(dataDir, 'metadata.sqlite')
+    const first = new MetadataStore(path)
+    const second = new MetadataStore(path)
+    try {
+      first.createBucket('bkt', 'us-east-1')
+      assert.equal(first.getConfig('bkt', 'versioning'), null)
+      second.putConfig('bkt', 'versioning', { status: 'Enabled' })
+      assert.deepEqual(first.getConfig('bkt', 'versioning'), { status: 'Enabled' })
+    } finally {
+      first.close()
+      second.close()
+    }
+  })
+
+  it('allocates unique version-list sequence values across connections', async () => {
+    const dataDir = await mkdtemp(join(root, 'metadata-sequence-'))
+    const path = join(dataDir, 'metadata.sqlite')
+    const first = new MetadataStore(path)
+    const second = new MetadataStore(path)
+    try {
+      first.createBucket('bkt', 'us-east-1')
+      const base = {
+        bucket: 'bkt', key: 'same-key', size: 1, etag: 'etag',
+        isLatest: true, isDeleteMarker: false, lastModified: Date.now(),
+      }
+      first.putObject({ ...base, versionId: 'v1' })
+      second.putObject({ ...base, versionId: 'v2' })
+
+      const sequences = first.allVersionsOfKey('bkt', 'same-key').map((row) => row.sequence)
+      assert.equal(new Set(sequences).size, 2)
+      const page1 = first.listVersions('bkt', { maxKeys: 1 })
+      const page2 = first.listVersions('bkt', {
+        maxKeys: 1,
+        keyMarker: page1.nextKeyMarker,
+        versionIdMarker: page1.nextVersionIdMarker,
+      })
+      assert.equal(page1.truncated, true)
+      assert.equal(page2.versions.length, 1)
+      assert.notEqual(page1.versions[0].versionId, page2.versions[0].versionId)
+    } finally {
+      first.close()
+      second.close()
+    }
+  })
+})
+
 describe('blobstore EXDEV resilience', () => {
   let blobs, dataDir
 

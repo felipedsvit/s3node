@@ -21,12 +21,15 @@ export class NotificationMetadata {
       // Atomically flips due rows to 'in-flight' and returns them in one step, so the
       // periodic worker and an explicit drain() can never both pick up the same row.
       claimDueNotifications: db.prepare(
-        "UPDATE notification_queue SET status = 'in-flight' WHERE id IN (" +
-        "  SELECT id FROM notification_queue WHERE status = 'pending' AND next_attempt_at <= ? ORDER BY id LIMIT ?" +
+        "UPDATE notification_queue SET status = 'in-flight', claimed_at = ? WHERE id IN (" +
+        "  SELECT id FROM notification_queue WHERE " +
+        "    (status = 'pending' AND next_attempt_at <= ?) OR " +
+        "    (status = 'in-flight' AND claimed_at <= ?) ORDER BY id LIMIT ?" +
         ') RETURNING id, bucket, target_id, endpoint, payload, attempts'),
       rescheduleNotification: db.prepare(
-        "UPDATE notification_queue SET status = 'pending', attempts = ?, next_attempt_at = ? WHERE id = ?"),
-      deadLetterNotification: db.prepare("UPDATE notification_queue SET status = 'dead', attempts = ? WHERE id = ?"),
+        "UPDATE notification_queue SET status = 'pending', claimed_at = NULL, attempts = ?, next_attempt_at = ? WHERE id = ?"),
+      deadLetterNotification: db.prepare(
+        "UPDATE notification_queue SET status = 'dead', claimed_at = NULL, attempts = ? WHERE id = ?"),
       deleteNotification: db.prepare('DELETE FROM notification_queue WHERE id = ?'),
     }
   }
@@ -38,8 +41,10 @@ export class NotificationMetadata {
   }
 
   /** Claims up to `limit` due rows for delivery, marking them 'in-flight' so no other caller can also pick them up. */
-  claimDueNotifications(now: number, limit = 100): NotificationQueueRow[] {
-    return this.statements.claimDueNotifications.all(now, limit) as unknown as NotificationQueueRow[]
+  claimDueNotifications(now: number, limit = 100, leaseMs = 30_000): NotificationQueueRow[] {
+    return this.statements.claimDueNotifications.all(
+      now, now, now - leaseMs, limit,
+    ) as unknown as NotificationQueueRow[]
   }
 
   rescheduleNotification(id: number, attempts: number, nextAttemptAt: number): void {

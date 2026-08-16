@@ -2,8 +2,7 @@
 
 ## Requirements
 
-- **Node.js >= 22.5.0** (required for `node:sqlite`)
-- **Node.js >= 22.12.0** (required for cluster mode with `SO_REUSEPORT`)
+- **Node.js >= 22.13.0** (`node:sqlite` is available without an experimental flag)
 - No runtime dependencies, no containers, no compilers
 
 ## Install from npm
@@ -24,6 +23,7 @@ npx @felipedsvit/s3node --data-dir ./data --port 9000
 
 ```sh
 npx @felipedsvit/s3node --help
+npx @felipedsvit/s3node --version
 ```
 
 ## Credential auto-generation

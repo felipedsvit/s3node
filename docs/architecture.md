@@ -54,11 +54,12 @@ src/
 
 The write path is ordered so a crash can only leave an orphan blob, never metadata pointing at missing data:
 
-1. Stream to `tmp/` temp file
-2. `fsync` temp file
-3. `rename` to final `data/<xx>/<yy>/<blobId>`
-4. `fsync` parent directory
-5. Commit metadata row to SQLite
+1. Journal the blob ID in SQLite
+2. Stream to a hidden temp file beside the final blob
+3. `fsync` the temp file
+4. `rename` to final `data/<xx>/<yy>/<blobId>`
+5. `fsync` the parent directory
+6. Commit metadata and clear the journal reservation in one transaction
 
 ## Why Node.js?
 

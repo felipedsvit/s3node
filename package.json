@@ -1,12 +1,16 @@
 {
   "name": "@felipedsvit/s3node",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "Embeddable, S3-compatible object storage server for Node.js",
   "type": "module",
   "main": "dist/src/index.js",
   "types": "dist/src/index.d.ts",
   "exports": {
-    ".": "./dist/src/index.js"
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js",
+      "default": "./dist/src/index.js"
+    }
   },
   "bin": {
     "s3node": "dist/bin/s3node.js"
@@ -16,10 +20,11 @@
     "docs",
     "assets",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "engines": {
-    "node": ">=22.5.0"
+    "node": ">=22.13.0"
   },
   "scripts": {
     "build": "tsc",
