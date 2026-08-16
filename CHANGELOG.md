@@ -11,6 +11,7 @@ All notable changes to s3node are documented here. The project follows semantic 
 - Add manifest-verified online backups that snapshot SQLite, `master.key`, active multipart uploads, and the exact referenced blob set while metadata writers are locked.
 - Add `s3node-backup backup`, `verify`, and `restore`, plus the public `createBackup()`, `verifyBackup()`, and `restoreBackup()` APIs.
 - Restore only into a new directory, verify SHA-256 checksums and SQLite integrity, and reject malformed or path-traversing manifests.
+- Prevent concurrent garbage collection from classifying blobs published after its filesystem snapshot begins as orphans.
 
 ### Operations and observability
 

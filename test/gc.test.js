@@ -125,6 +125,29 @@ describe('GarbageCollector', () => {
     await assert.doesNotReject(store.blobs.size(record.blobId))
   })
 
+  it('does not collect a blob published after the filesystem snapshot starts', async () => {
+    const originalWalk = gc._walkBlobs.bind(gc)
+    let announceWalk
+    let releaseWalk
+    const walkStarted = new Promise((resolve) => { announceWalk = resolve })
+    const walkGate = new Promise((resolve) => { releaseWalk = resolve })
+    gc._walkBlobs = async function* () {
+      announceWalk()
+      await walkGate
+      yield* originalWalk()
+    }
+
+    const collecting = gc.collect()
+    await walkStarted
+    await store.putObject({ bucket: 'bkt', key: 'late', body: body('survives snapshot race') })
+    const record = store.getObject('bkt', 'late')
+    releaseWalk()
+
+    const stats = await collecting
+    assert.equal(stats.orphaned, 0)
+    await assert.doesNotReject(store.blobs.size(record.blobId))
+  })
+
   it('only reclaims abandoned pending reservations with an explicit safe age', async () => {
     const { blobId } = await store.blobs.write(body('abandoned'), { algorithms: ['md5'] })
     store.metadata.reserveBlob(blobId)

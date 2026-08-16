@@ -1,6 +1,6 @@
 # Testing
 
-s3node has 418 unit and HTTP-level integration tests, plus interoperability suites that drive real S3 clients against the server.
+s3node has 419 unit and HTTP-level integration tests, plus interoperability suites that drive real S3 clients against the server.
 
 ## Running tests
 

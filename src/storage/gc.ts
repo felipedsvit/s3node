@@ -19,13 +19,16 @@ export interface GCStats {
  *
  * Design
  * ------
- * 1. Collect every referenced blobId from the metadata store into a Set.
- * 2. Walk the blob directory tree, testing each file against the Set.
+ * 1. Snapshot the blob IDs currently visible in the filesystem.
+ * 2. Collect every referenced blobId from the metadata store into a Set.
  * 3. Files not in the Set are orphaned and removed in batches.
  * 4. After removal, empty intermediate directories are cleaned up.
  *
- * The referenced Set is the dominant memory cost; for most deployments it is
- * proportionate to the number of stored objects and parts.
+ * Filesystem-first ordering is important: a writer reserves metadata before it
+ * publishes a blob. A blob created after the filesystem snapshot is ignored by
+ * this run, while any active blob captured by the snapshot must be present in
+ * the later metadata snapshot. Taking metadata first would let a new blob appear
+ * between the snapshots and be mistaken for an orphan.
  */
 export class GarbageCollector {
   constructor(private readonly store: ObjectStore) {}
@@ -35,16 +38,11 @@ export class GarbageCollector {
    * without deleting anything.
    */
   async scan(): Promise<GCStats> {
+    const blobIds = await this._snapshotBlobIds()
     const referenced = this.store.metadata.allReferencedBlobIds()
-    let scanned = 0
-    let orphaned = 0
+    const orphaned = blobIds.reduce((count, blobId) => count + (referenced.has(blobId) ? 0 : 1), 0)
 
-    for await (const _blobId of this._walkBlobs()) {
-      scanned++
-      if (!referenced.has(_blobId)) orphaned++
-    }
-
-    return { scanned, referenced: referenced.size, orphaned, deleted: 0 }
+    return { scanned: blobIds.length, referenced: referenced.size, orphaned, deleted: 0 }
   }
 
   /**
@@ -55,15 +53,14 @@ export class GarbageCollector {
     if (stalePendingBlobAgeMs > 0) {
       this.store.metadata.releasePendingBlobsCreatedBefore(Date.now() - stalePendingBlobAgeMs)
     }
+    const blobIds = await this._snapshotBlobIds()
     const referenced = this.store.metadata.allReferencedBlobIds()
-    let scanned = 0
     let orphaned = 0
     let deleted = 0
     const batch: string[] = []
     const dirsTouched = new Set<string>()
 
-    for await (const blobId of this._walkBlobs()) {
-      scanned++
+    for (const blobId of blobIds) {
       if (referenced.has(blobId)) continue
       orphaned++
       batch.push(blobId)
@@ -82,10 +79,16 @@ export class GarbageCollector {
 
     await this._removeEmptyDirs(dirsTouched)
 
-    const msg = `GC: scanned=${_fmt(scanned)} referenced=${_fmt(referenced.size)} orphaned=${_fmt(orphaned)} deleted=${_fmt(deleted)}`
+    const msg = `GC: scanned=${_fmt(blobIds.length)} referenced=${_fmt(referenced.size)} orphaned=${_fmt(orphaned)} deleted=${_fmt(deleted)}`
     console.error(msg)
 
-    return { scanned, referenced: referenced.size, orphaned, deleted }
+    return { scanned: blobIds.length, referenced: referenced.size, orphaned, deleted }
+  }
+
+  private async _snapshotBlobIds(): Promise<string[]> {
+    const blobIds: string[] = []
+    for await (const blobId of this._walkBlobs()) blobIds.push(blobId)
+    return blobIds
   }
 
   /** Async generator that walks the blob directory tree. */
