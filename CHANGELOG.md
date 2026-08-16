@@ -4,6 +4,26 @@ All notable changes to s3node are documented here. The project follows semantic 
 
 ## Unreleased
 
+## 0.1.10 - 2026-08-16
+
+### Backup and recovery
+
+- Add manifest-verified online backups that snapshot SQLite, `master.key`, active multipart uploads, and the exact referenced blob set while metadata writers are locked.
+- Add `s3node-backup backup`, `verify`, and `restore`, plus the public `createBackup()`, `verifyBackup()`, and `restoreBackup()` APIs.
+- Restore only into a new directory, verify SHA-256 checksums and SQLite integrity, and reject malformed or path-traversing manifests.
+
+### Operations and observability
+
+- Add fault-injection crash tests across blob publication, metadata commits and migrations, multipart completion, and garbage collection.
+- Add notification queue, SQLite WAL, filesystem capacity, process restart, garbage collection, and latency signals to Prometheus metrics.
+- Add a repeatable soak runner, an AWS CLI/boto3/rclone interoperability matrix, and Node 22.13/24 CI quality gates.
+- Create data directories with owner-only permissions and keep informational CLI paths free from `node:sqlite` startup warnings.
+
+### Documentation
+
+- Document backup, restore, metrics, crash recovery, client compatibility, and the single-node production boundary in the repository and project wiki.
+- Publish the proposed authenticated-content format, availability recommendation, S3 API priorities, and Phase 2 readiness evidence in the wiki.
+
 ## 0.1.9 - 2026-08-16
 
 ### Security

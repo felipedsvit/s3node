@@ -1,4 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite'
+import { faultPoint } from '../../faults.js'
 
 // v4 only adds a new table (CREATE TABLE IF NOT EXISTS), so it needs no
 // migrate function: unlike the v1->v2/v2->v3 ALTERs, there is no existing
@@ -127,6 +128,7 @@ export function migrateV5ToV6(db: DatabaseSync): void {
   if (!columns.includes('retention_mode')) db.exec('ALTER TABLE uploads ADD COLUMN retention_mode TEXT')
   if (!columns.includes('retain_until')) db.exec('ALTER TABLE uploads ADD COLUMN retain_until INTEGER')
   if (!columns.includes('legal_hold')) db.exec('ALTER TABLE uploads ADD COLUMN legal_hold INTEGER NOT NULL DEFAULT 0')
+  faultPoint('migration:v5-v6:after-alter')
 }
 
 export function migrateV1ToV2(db: DatabaseSync): void {

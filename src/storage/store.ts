@@ -99,7 +99,9 @@ export class ObjectStore {
         throw new TypeError(`${name} must be a non-negative safe integer`)
       }
     }
-    await mkdir(options.dataDir, { recursive: true })
+    // New stores are private by default. Existing directories retain their
+    // operator-managed ACLs; deployment checks document the required 0700 mode.
+    await mkdir(options.dataDir, { recursive: true, mode: 0o700 })
     const blobs = new BlobStore(options.dataDir)
     await blobs.init()
     const maxConcurrentWrites = options.maxConcurrentWrites ?? MAX_CONCURRENT_WRITES

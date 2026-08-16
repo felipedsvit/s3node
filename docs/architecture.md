@@ -34,8 +34,10 @@ src/
   http.ts        Request parsing, range headers, preconditions
   router.ts      Route resolution
   errors.ts      S3 error codes
+  backup.ts      Manifest-verified backup and restore
   metrics.ts     Prometheus metrics
   cluster.ts     Multi-worker supervision
+  faults.ts      Inert-by-default test fault injection
 ```
 
 ## Request lifecycle
@@ -60,6 +62,9 @@ The write path is ordered so a crash can only leave an orphan blob, never metada
 4. `rename` to final `data/<xx>/<yy>/<blobId>`
 5. `fsync` the parent directory
 6. Commit metadata and clear the journal reservation in one transaction
+
+Crash-recovery tests terminate worker processes at each publication boundary and
+then verify SQLite integrity and that metadata never references a missing blob.
 
 ## Why Node.js?
 

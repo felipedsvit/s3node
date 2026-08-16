@@ -56,7 +56,7 @@ curl -u AKIDTEST:test-secret http://127.0.0.1:9001/api/info
 ```
 
 ```json
-{"region":"us-east-1","version":"0.1.6","buckets":3,"objects":42,"bytes":1048576}
+{"region":"us-east-1","version":"0.1.10","buckets":3,"objects":42,"bytes":1048576}
 ```
 
 ```sh
@@ -76,3 +76,22 @@ curl -u AKIDTEST:test-secret 'http://127.0.0.1:9001/api/objects?bucket=my-bucket
 ```json
 {"objects":[{"key":"photos/sunset.jpg","size":204800,"etag":"\"abc123\"","lastModified":"2025-01-15T10:31:00.000Z"}],"truncated":false}
 ```
+
+## Operational metrics
+
+`GET /metrics` renders Prometheus text and refreshes storage gauges at scrape
+time. In addition to HTTP request and byte counters, it exposes:
+
+| Metric family | Signal |
+|---------------|--------|
+| `s3node_notification_queue_messages` | queued, processing, and dead notifications |
+| `s3node_sqlite_wal_bytes` | current SQLite WAL size |
+| `s3node_storage_free_bytes`, `s3node_storage_total_bytes` | data filesystem capacity |
+| `s3node_process_start_time_seconds`, `s3node_server_starts_total` | process restarts |
+| `s3node_gc_*` | GC runs, failures, duration, latest counts, and last success |
+| `s3node_http_request_duration_seconds` | latency histogram by S3 action |
+
+The endpoint is unauthenticated so a Prometheus server can scrape it; keep the
+console on a trusted network. In CLI cluster mode it belongs to worker 1, so
+HTTP totals and latency are not cluster-wide aggregates. Storage, queue, WAL,
+and disk gauges still describe the shared data directory.

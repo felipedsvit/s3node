@@ -11,6 +11,7 @@ import { PassThrough, Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { S3Error } from '../errors.js'
 import type { EncryptionManager } from '../features/encryption.js'
+import { faultPoint } from '../faults.js'
 import { toKeyBuffer } from '../util/bytes.js'
 import { Semaphore } from '../util/semaphore.js'
 import { newBlobId, READ_HIGH_WATER_MARK, type BlobStore, type BlobWriteOptions, type WriteResult } from './blobs.js'
@@ -72,7 +73,9 @@ export async function writeReservedBlob(
   const blobId = newBlobId()
   ctx.metadata.reserveBlob(blobId)
   try {
-    return await ctx.blobs.write(source, { ...options, blobId })
+    const result = await ctx.blobs.write(source, { ...options, blobId })
+    faultPoint('write:after-blob')
+    return result
   } catch (err) {
     ctx.metadata.releasePendingBlob(blobId)
     throw err

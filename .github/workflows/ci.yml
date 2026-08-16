@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Node ${{ matrix.node }} quality gates
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22.13.0', '24.x']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      # Includes real SIGKILL recovery and backup/restore drills.
+      - run: npm test
+      - run: npm run test:interop
+      - run: npm audit --omit=dev
+      - run: npm pack --dry-run --json
+      - run: git diff --check
+
+  operational:
+    name: Client matrix and soak smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          cache: npm
+      - run: npm ci
+      - name: Install external S3 clients
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes python3-venv rclone
+          python3 -m venv .client-venv
+          .client-venv/bin/pip install awscli boto3
+          echo "$PWD/.client-venv/bin" >> "$GITHUB_PATH"
+      - run: npm run build
+      - run: node test/interop/client-matrix.mjs --require aws-cli,boto3,rclone
+      - run: npm run test:soak:smoke

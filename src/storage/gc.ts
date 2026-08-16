@@ -1,6 +1,7 @@
 import { readdir, rm, rmdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { ObjectStore } from './store.js'
+import { faultPoint } from '../faults.js'
 
 const BLOB_ID_RE = /^[0-9a-f]{32}$/
 const GC_BATCH = 1024
@@ -122,7 +123,9 @@ export class GarbageCollector {
   }
 
   private async _removeBatch(blobIds: string[]): Promise<void> {
+    faultPoint('gc:before-delete')
     await this.store.blobs.removeMany(blobIds, { concurrency: 32 })
+    faultPoint('gc:after-delete')
   }
 
   private async _removeEmptyDirs(touched: Set<string>): Promise<void> {

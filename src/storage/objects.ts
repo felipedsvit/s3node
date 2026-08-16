@@ -1,5 +1,6 @@
 import { Readable } from 'node:stream'
 import { S3Error } from '../errors.js'
+import { faultPoint } from '../faults.js'
 import { blockAlignedOffset, type EncryptionContext, type SseRequest } from '../features/encryption.js'
 import {
   applyDefaultRetention,
@@ -65,6 +66,7 @@ export class ObjectService {
     try {
       ({ blobId, size, hasher } = await writeReservedBlob(
         this.ctx, input.body, { algorithms, transforms, maxSize: streamMax }))
+      faultPoint('put:after-blob')
     } finally {
       release()
     }
@@ -118,6 +120,7 @@ export class ObjectService {
         this.ctx.metadata.releasePendingBlob(blobId)
       })
       metadataCommitted = true
+      faultPoint('put:after-metadata')
 
       if (replaced) await this.releaseObjectBlobs(replaced)
 
@@ -308,6 +311,7 @@ export class ObjectService {
         this.ctx.metadata.releasePendingBlob(blobId)
       })
       metadataCommitted = true
+      faultPoint('copy:after-metadata')
       if (replaced) await this.releaseObjectBlobs(replaced)
       return { etag, lastModified, size, versionId, versioned: versioning === 'Enabled', encryption }
     } catch (err) {

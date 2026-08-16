@@ -104,9 +104,7 @@ export class ConsoleServer {
     if (url.pathname === '/metrics' && req.method === 'GET') {
       const { store, metrics } = this.options
       if (!metrics) { res.writeHead(404, { 'Content-Type': 'text/plain' }); res.end('Metrics not enabled\n'); return }
-      const buckets = store.listBuckets()
-      const activeUploads = buckets.reduce((total, bucket) => total + store.metadata.uploadCount(bucket.name), 0)
-      metrics.activeMultipartUploads.set({}, activeUploads)
+      await metrics.collectOperational(store)
       const body = Buffer.from(metrics.renderPrometheus(), 'utf8')
       res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4', 'Content-Length': body.length })
       res.end(body)

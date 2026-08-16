@@ -1,6 +1,6 @@
 # Testing
 
-s3node has 402 unit and HTTP-level integration tests, plus an interoperability suite that drives the real AWS SDK against the server.
+s3node has 418 unit and HTTP-level integration tests, plus interoperability suites that drive real S3 clients against the server.
 
 ## Running tests
 
@@ -13,6 +13,8 @@ npm run test:watch
 
 # Interop suite (drives real @aws-sdk/client-s3 against in-process server)
 npm run test:interop
+npm run test:interop:matrix
+npm run test:soak:smoke
 ```
 
 ## Test structure
@@ -41,7 +43,17 @@ npm run test:interop
 | `cluster.test.js` | Worker count, SO_REUSEPORT, crash recovery |
 | `util.test.js` | CRC, byte ordering, range parsing, semaphore, rate limiter |
 | `rateLimiter.test.js` | Throttling behavior |
+| `crash-recovery.test.js` | SIGKILL fault injection across blob, WAL/metadata, migration, multipart, and GC stages |
+| `backup.test.js` | Manifest-verified online backup and restore drill |
 | `cache.test.js` | LRUCache: eviction, TTL, promotion |
+
+Long-running load and the AWS CLI/boto3/rclone matrix are documented in
+[Production operations](https://github.com/felipedsvit/s3node/wiki/Production-Operations).
+
+`.github/workflows/ci.yml` runs the full suite (including SIGKILL recovery and
+backup drills) on Node 22.13 and Node 24. A separate operational job installs all
+three external clients and runs the ten-second soak smoke, so missing clients are
+failures in CI rather than skips.
 
 ## Interop suite
 

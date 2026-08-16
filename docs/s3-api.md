@@ -91,3 +91,10 @@ The full POST object upload with signed policy documents is supported:
 These return `NotImplemented` instead of silently succeeding:
 
 acl, website, replication, encryption (bucket-level default), accelerate, logging, requestPayment, analytics, inventory, metrics, publicAccessBlock, intelligent-tiering, ownershipControls, restore, select
+
+The compatibility priorities are bucket default encryption, Public Access
+Block/Ownership Controls, and a deliberately restricted owner/full-control ACL
+model. Restore and replication should not be exposed without real archival and
+replication engines. See the
+[authenticated-content design](https://github.com/felipedsvit/s3node/wiki/Authenticated-Content-Encryption-Design)
+for the complete rationale.

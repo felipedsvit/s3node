@@ -3,6 +3,7 @@ import { BucketMetadata } from './metadata/buckets.js'
 import { MultipartMetadata } from './metadata/multipart.js'
 import { NotificationMetadata } from './metadata/notifications.js'
 import { ObjectMetadata } from './metadata/objects.js'
+import { faultPoint } from '../faults.js'
 import { migrateV1ToV2, migrateV2ToV3, migrateV4ToV5, migrateV5ToV6, NULL_VERSION, SCHEMA, SCHEMA_VERSION } from './metadata/schema.js'
 import type { BucketRecord, ListObjectsResult, ListVersionsResult, NotificationQueueRow, ObjectInput, ObjectRecord, PartRecord, UploadRecord } from './metadata/types.js'
 
@@ -11,12 +12,14 @@ export type { BucketRecord, ListObjectsResult, ListVersionsResult, NotificationQ
 
 export class MetadataStore {
   db: DatabaseSync
+  readonly path: string
   private buckets: BucketMetadata
   private notifications: NotificationMetadata
   private objects: ObjectMetadata
   private multipart: MultipartMetadata
 
   constructor(path: string, { bucketCacheSize = 1024, configCacheSize = 4096, cacheTtlMs = 60000 } = {}) {
+    this.path = path
     this.db = new DatabaseSync(path)
     this.db.exec('PRAGMA journal_mode = WAL')
     this.db.exec('PRAGMA synchronous = FULL')
@@ -64,6 +67,7 @@ export class MetadataStore {
     try {
       const result = fn()
       this.db.exec('COMMIT')
+      faultPoint('metadata:after-commit')
       return result
     } catch (err) {
       try { this.db.exec('ROLLBACK') } catch { /* already rolled back */ }
@@ -134,6 +138,15 @@ export class MetadataStore {
 
   deleteNotification(id: number): void {
     this.notifications.deleteNotification(id)
+  }
+
+  notificationQueueCounts(): Record<string, number> {
+    const counts: Record<string, number> = { pending: 0, 'in-flight': 0, dead: 0 }
+    for (const row of this.db.prepare(
+      'SELECT status, count(*) AS total FROM notification_queue GROUP BY status').all() as { status: string; total: number }[]) {
+      counts[row.status] = row.total
+    }
+    return counts
   }
 
   // ── Objects ──────────────────────────────────────────────────────────

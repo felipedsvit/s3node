@@ -6,6 +6,7 @@ import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { HashingStream } from '../util/hash.js'
 import { MaxSizeStream } from '../util/bytes.js'
+import { faultPoint } from '../faults.js'
 import { sliceParts, type BlobPart } from './parts.js'
 
 export const READ_HIGH_WATER_MARK = 1024 * 1024
@@ -82,6 +83,7 @@ export class BlobStore {
       } finally {
         await handle.close()
       }
+      faultPoint('blob:after-file-fsync')
 
       try {
         await rename(tmpPath, finalPath)
@@ -106,6 +108,7 @@ export class BlobStore {
         }
       }
       await fsyncDirectory(dirname(finalPath))
+      faultPoint('blob:after-publish')
 
       return { blobId, size: hasher.bytesWritten, hasher }
     } catch (err) {

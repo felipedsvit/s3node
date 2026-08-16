@@ -57,7 +57,7 @@ Notification delivery rejects loopback, private, link-local, and redirecting end
 
 ### Key backup
 
-SSE-S3 depends on `<dataDir>/master.key`. Back it up and restore it atomically with the metadata database. The server refuses to replace a malformed key, because generating a new one would make existing encrypted data unreadable.
+SSE-S3 depends on `<dataDir>/master.key`. Use the manifest-verified `s3node-backup` tool documented in [Production operations](https://github.com/felipedsvit/s3node/wiki/Production-Operations) so the key, SQLite snapshot, active multipart state, and referenced blobs are captured consistently. The server refuses to replace a malformed key, because generating a new one would make existing encrypted data unreadable.
 
 ## Security Scanning
 

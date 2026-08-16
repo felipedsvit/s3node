@@ -27,6 +27,7 @@ import type { AuthInfo, RequestContext } from './http.js'
 import { MetricsRegistry } from './metrics.js'
 import { resolveRoute } from './router.js'
 import { ObjectStore } from './storage/store.js'
+import { GarbageCollector, type GCStats } from './storage/gc.js'
 import type { ObjectRecord } from './storage/metadata.js'
 import { RateLimiter } from './util/rateLimiter.js'
 
@@ -136,6 +137,7 @@ export class S3NodeServer {
     })
     this.lifecycleTimer = null
     this.metrics = new MetricsRegistry()
+    this.metrics.markServerStart()
     this.rateLimiter = options.rateLimitPerSecond
       ? new RateLimiter(options.rateLimitBurst ?? options.rateLimitPerSecond, options.rateLimitPerSecond)
       : null
@@ -205,6 +207,18 @@ export class S3NodeServer {
 
   runLifecycle(options?: { now?: number }): Promise<LifecycleSummary> {
     return runLifecycle(this.store, options)
+  }
+
+  async runGarbageCollection(options?: { stalePendingBlobAgeMs?: number }): Promise<GCStats> {
+    const started = process.hrtime.bigint()
+    try {
+      const stats = await new GarbageCollector(this.store).collect(options)
+      this.metrics.recordGarbageCollection(stats, Number(process.hrtime.bigint() - started) / 1e9)
+      return stats
+    } catch (err) {
+      this.metrics.recordGarbageCollectionFailure(Number(process.hrtime.bigint() - started) / 1e9)
+      throw err
+    }
   }
 
   async _handle(req: IncomingMessage, res: ServerResponse, expectContinue: boolean): Promise<void> {

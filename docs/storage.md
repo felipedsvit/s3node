@@ -17,7 +17,7 @@
 
 Opening an older data directory runs all required schema migrations inside one
 transaction. Before upgrading, back up `metadata.sqlite` and `master.key`
-together. Downgrading a data directory after it has been opened by v0.1.9 is not
+together. Downgrading a data directory after it has been opened by v0.1.10 is not
 supported, and databases created by a newer schema are rejected at startup.
 
 ### `buckets` table
@@ -95,6 +95,14 @@ This journal protects a blob between its filesystem publication and metadata com
 - `value` (INTEGER)
 
 The database-wide counter gives versions a unique ordering across cluster workers.
+
+## Backups
+
+Do not copy `metadata.sqlite` and the blob tree independently while writes are
+running. Use `s3node-backup`, which holds the metadata write lock, uses SQLite's
+snapshot facilities to fold in committed WAL pages, copies the exact referenced
+blob set plus `master.key`, and writes a SHA-256 manifest. The complete drill and
+restore procedure are in [Production operations](https://github.com/felipedsvit/s3node/wiki/Production-Operations).
 
 ## Design decisions
 

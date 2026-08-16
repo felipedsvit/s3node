@@ -4,6 +4,10 @@
  * https://github.com/prometheus/docs/blob/main/content/docs/instrumenting/exposition_formats.md
  */
 
+import { stat, statfs } from 'node:fs/promises'
+import type { ObjectStore } from './storage/store.js'
+import type { GCStats } from './storage/gc.js'
+
 type Labels = Record<string, string>
 
 function labelKey(labels: Labels): string {
@@ -114,6 +118,58 @@ export class MetricsRegistry {
   readonly bytesInTotal = new Counter('s3node_bytes_in_total', 'Total request body bytes received')
   readonly bytesOutTotal = new Counter('s3node_bytes_out_total', 'Total response body bytes sent')
   readonly activeMultipartUploads = new Gauge('s3node_active_multipart_uploads', 'In-progress multipart uploads')
+  readonly notificationQueueMessages = new Gauge('s3node_notification_queue_messages', 'Persistent notification queue messages by status')
+  readonly sqliteWalBytes = new Gauge('s3node_sqlite_wal_bytes', 'Current SQLite WAL file size in bytes')
+  readonly storageFreeBytes = new Gauge('s3node_storage_free_bytes', 'Free bytes available on the data directory filesystem')
+  readonly storageTotalBytes = new Gauge('s3node_storage_total_bytes', 'Total bytes on the data directory filesystem')
+  readonly processStartTimeSeconds = new Gauge('s3node_process_start_time_seconds', 'Unix time when this server process started')
+  readonly serverStartsTotal = new Counter('s3node_server_starts_total', 'Server instances started in this process')
+  readonly gcRunsTotal = new Counter('s3node_gc_runs_total', 'Garbage collection runs by result')
+  readonly gcDurationSeconds = new Histogram('s3node_gc_duration_seconds', 'Garbage collection duration in seconds')
+  readonly gcLastScannedBlobs = new Gauge('s3node_gc_last_scanned_blobs', 'Blobs scanned by the latest successful garbage collection')
+  readonly gcLastOrphanedBlobs = new Gauge('s3node_gc_last_orphaned_blobs', 'Orphaned blobs found by the latest successful garbage collection')
+  readonly gcLastDeletedBlobs = new Gauge('s3node_gc_last_deleted_blobs', 'Blobs deleted by the latest successful garbage collection')
+  readonly gcLastSuccessTimestampSeconds = new Gauge('s3node_gc_last_success_timestamp_seconds', 'Unix time of the latest successful garbage collection')
+
+  markServerStart(): void {
+    this.processStartTimeSeconds.set({}, Math.floor(Date.now() / 1000 - process.uptime()))
+    this.serverStartsTotal.inc()
+  }
+
+  recordGarbageCollection(stats: GCStats, durationSeconds: number): void {
+    this.gcRunsTotal.inc({ result: 'success' })
+    this.gcDurationSeconds.observe({}, durationSeconds)
+    this.gcLastScannedBlobs.set({}, stats.scanned)
+    this.gcLastOrphanedBlobs.set({}, stats.orphaned)
+    this.gcLastDeletedBlobs.set({}, stats.deleted)
+    this.gcLastSuccessTimestampSeconds.set({}, Math.floor(Date.now() / 1000))
+  }
+
+  recordGarbageCollectionFailure(durationSeconds: number): void {
+    this.gcRunsTotal.inc({ result: 'error' })
+    this.gcDurationSeconds.observe({}, durationSeconds)
+  }
+
+  async collectOperational(store: ObjectStore): Promise<void> {
+    const buckets = store.listBuckets()
+    const activeUploads = buckets.reduce((total, bucket) => total + store.metadata.uploadCount(bucket.name), 0)
+    this.activeMultipartUploads.set({}, activeUploads)
+    for (const [status, count] of Object.entries(store.metadata.notificationQueueCounts())) {
+      this.notificationQueueMessages.set({ status }, count)
+    }
+
+    let walBytes = 0
+    if (store.metadata.path !== ':memory:') {
+      try { walBytes = (await stat(`${store.metadata.path}-wal`)).size } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+      }
+    }
+    this.sqliteWalBytes.set({}, walBytes)
+
+    const filesystem = await statfs(store.blobs.root)
+    this.storageFreeBytes.set({}, filesystem.bavail * filesystem.bsize)
+    this.storageTotalBytes.set({}, filesystem.blocks * filesystem.bsize)
+  }
 
   renderPrometheus(): string {
     const sections = [
@@ -123,6 +179,18 @@ export class MetricsRegistry {
       this.bytesInTotal.render(),
       this.bytesOutTotal.render(),
       this.activeMultipartUploads.render(),
+      this.notificationQueueMessages.render(),
+      this.sqliteWalBytes.render(),
+      this.storageFreeBytes.render(),
+      this.storageTotalBytes.render(),
+      this.processStartTimeSeconds.render(),
+      this.serverStartsTotal.render(),
+      this.gcRunsTotal.render(),
+      this.gcDurationSeconds.render(),
+      this.gcLastScannedBlobs.render(),
+      this.gcLastOrphanedBlobs.render(),
+      this.gcLastDeletedBlobs.render(),
+      this.gcLastSuccessTimestampSeconds.render(),
     ].filter(Boolean)
     return sections.join('\n') + '\n'
   }

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { S3Error } from '../errors.js'
+import { faultPoint } from '../faults.js'
 import type { EncryptionContext } from '../features/encryption.js'
 import { toKeyBuffer } from '../util/bytes.js'
 import { multipartEtag } from '../util/hash.js'
@@ -91,6 +92,7 @@ export class MultipartService {
     try {
       ({ blobId, size, hasher } = await writeReservedBlob(
         this.ctx, input.body, { algorithms, transforms, maxSize: effectiveMax }))
+      faultPoint('multipart-part:after-blob')
     } finally {
       release()
     }
@@ -118,6 +120,7 @@ export class MultipartService {
         this.ctx.metadata.releasePendingBlob(blobId)
       })
       metadataCommitted = true
+      faultPoint('multipart-part:after-metadata')
       if (previous.value) await this.ctx.blobs.remove(previous.value.blobId)
       return { etag, size, encryption: uploadEncryption }
     } catch (err) {
@@ -278,6 +281,7 @@ export class MultipartService {
       })
       this.ctx.metadata.deleteUpload(input.uploadId)
     })
+    faultPoint('multipart-complete:after-metadata')
 
     const kept = new Set(manifest.map((part) => part.blobId))
     const discarded = [...stored.values()].map((part) => part.blobId).filter((id) => !kept.has(id))

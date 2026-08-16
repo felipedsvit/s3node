@@ -1,6 +1,6 @@
 {
   "name": "@felipedsvit/s3node",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Embeddable, S3-compatible object storage server for Node.js",
   "type": "module",
   "main": "dist/src/index.js",
@@ -13,7 +13,8 @@
     }
   },
   "bin": {
-    "s3node": "dist/bin/s3node.js"
+    "s3node": "dist/bin/s3node.js",
+    "s3node-backup": "dist/bin/s3node-backup.js"
   },
   "files": [
     "dist",
@@ -36,6 +37,9 @@
     "test:watch": "node --test --watch \"test/*.test.js\"",
     "pretest:interop": "npm run build",
     "test:interop": "node test/interop/aws-sdk.mjs",
+    "test:interop:matrix": "npm run build && node test/interop/client-matrix.mjs",
+    "test:soak": "node tools/soak.mjs",
+    "test:soak:smoke": "node tools/soak.mjs --duration-seconds 10 --concurrency 2",
     "prepublishOnly": "npm run build",
     "prestart": "npm run build",
     "start": "node dist/bin/s3node.js"

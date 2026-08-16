@@ -65,3 +65,19 @@ s3node --data-dir ./data --quiet
 s3node --data-dir ./data --max-concurrent-writes 32 --rate-limit 500 \
   --rate-limit-burst 1000 --request-timeout-ms 120000
 ```
+
+## Backup utility
+
+The package also installs `s3node-backup`. It creates and verifies a consistent
+snapshot of SQLite metadata, `master.key`, active multipart state, and every
+referenced blob:
+
+```sh
+s3node-backup backup --source ./data --destination /backups/s3node-2026-08-16
+s3node-backup verify --source /backups/s3node-2026-08-16
+s3node-backup restore --source /backups/s3node-2026-08-16 --destination ./restored-data
+```
+
+Backup and restore destinations must not already exist. Keep backups outside the
+source filesystem and test restores regularly. See the complete
+[production runbook](https://github.com/felipedsvit/s3node/wiki/Production-Operations).

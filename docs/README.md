@@ -22,4 +22,10 @@
 | 14 | [Architecture](architecture.md) | Design decisions, how it works |
 | 15 | [Limits](limits.md) | Known limits, comparisons with MinIO and LocalStack |
 
+Operational and design material is maintained in the project wiki:
+
+- [Production Operations](https://github.com/felipedsvit/s3node/wiki/Production-Operations)
+- [Authenticated Content Encryption Design](https://github.com/felipedsvit/s3node/wiki/Authenticated-Content-Encryption-Design)
+- [Phase 2 Production Readiness](https://github.com/felipedsvit/s3node/wiki/Phase-2-Production-Readiness)
+
 See the project [changelog](../CHANGELOG.md) for release notes and upgrade guidance.

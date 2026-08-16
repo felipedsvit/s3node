@@ -85,14 +85,14 @@ await s3node.close()
 
 `--access-key` and `--secret-key` must be given together.
 
-## Upgrading to v0.1.9
+## Upgrading to v0.1.10
 
 - Node.js 22.13.0 or newer is required.
-- Metadata is migrated transactionally to schema v6 on first open. Back up `metadata.sqlite` and `master.key` together before upgrading; downgrading an opened data directory is not supported.
-- Private, loopback, and link-local notification endpoints are rejected by default. Enable them only on trusted networks with `allowPrivateNotificationEndpoints` or `--allow-private-notification-endpoints`.
-- The CLI now applies bounded write concurrency, rate limits, request timeouts, and graceful shutdown defaults. See [Configuration](docs/configuration.md) for overrides.
+- The metadata schema remains at v6. Use `s3node-backup` to capture `metadata.sqlite`, `master.key`, active multipart state, and referenced blobs together before upgrading.
+- The new operational metrics are exposed from the admin console's `/metrics` endpoint. In CLI cluster mode, HTTP counters remain local to worker 1.
+- No authenticated-content migration is performed: existing SSE-C/SSE-S3 object data remains AES-256-CTR and retains the integrity boundary documented in [Security](SECURITY.md).
 
-See the [v0.1.9 changelog](CHANGELOG.md#019---2026-08-16) for the complete release summary.
+See the [v0.1.10 changelog](CHANGELOG.md#0110---2026-08-16) for the complete release summary.
 
 ## Examples
 
@@ -121,6 +121,9 @@ s3node --data-dir ./data --access-key AKIDTEST --secret-key test-secret
 | [Architecture](docs/architecture.md) | Design decisions, how it works |
 | [Features](docs/features.md) | Lifecycle, notifications, Object Lock, CORS, policies, tagging |
 | [Cluster Mode](docs/cluster.md) | Multi-worker with SO_REUSEPORT |
+| [Production Operations](https://github.com/felipedsvit/s3node/wiki/Production-Operations) | Secure deployment, backup/restore, soak, client matrix, metrics |
+| [Authenticated Content Encryption Design](https://github.com/felipedsvit/s3node/wiki/Authenticated-Content-Encryption-Design) | Proposed authenticated content format and HA recommendation |
+| [Phase 2 Production Readiness](https://github.com/felipedsvit/s3node/wiki/Phase-2-Production-Readiness) | Evidence, findings, verdict, and remaining risks |
 | [Testing](docs/testing.md) | Running tests, interop suite, coverage |
 | [Limits](docs/limits.md) | Known limits, comparisons with MinIO and LocalStack |
 

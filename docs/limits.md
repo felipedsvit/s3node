@@ -4,6 +4,12 @@
 
 s3node is a single-node server. Durability is delegated to the filesystem underneath (RAID, ZFS, or replication at the storage layer). There is no erasure coding, no multi-node replication, and no automatic failover. This is a deliberate scope decision.
 
+CLI cluster mode runs several processes on the same host and shared data
+directory; it improves CPU utilization but does not remove SQLite, the
+filesystem, or the host as a single point of failure. Mission-critical data
+needs a mature replicated object store rather than a shared-network-filesystem
+deployment of s3node.
+
 ## No sendfile
 
 Node.js has no `sendfile` binding, so every read pays extra memory copies. For large objects, this means higher CPU usage per byte served compared to Go or Rust servers.
@@ -42,3 +48,7 @@ In cluster mode, SQLite WAL allows concurrent reads but serializes writes. The m
 - You need multi-node replication or erasure coding -> use MinIO
 - You need other AWS services (SQS, DynamoDB, Lambda) -> use LocalStack
 - You need maximum throughput per node -> use MinIO (Go), or a CDN-backed solution
+- You require authenticated ciphertext at rest today -> use client-side encryption or a storage system with authenticated object encryption
+
+See the [Phase 2 readiness assessment](https://github.com/felipedsvit/s3node/wiki/Phase-2-Production-Readiness)
+for the validated single-node boundary and remaining environmental tests.

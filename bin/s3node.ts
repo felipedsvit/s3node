@@ -1,15 +1,13 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util'
 import { resolve } from 'node:path'
-import { createServer } from '../src/index.js'
 import { generateCredential } from '../src/auth/credentials.js'
 import type { Credential } from '../src/auth/credentials.js'
-import { clusterSupported, defaultWorkerCount, runCluster } from '../src/cluster.js'
-import { ConsoleServer } from '../src/console/server.js'
+import type { ConsoleServer as ConsoleServerInstance } from '../src/console/server.js'
 import type { S3NodeServer } from '../src/server.js'
 import { redactUrlForLog } from '../src/http.js'
 
-const VERSION = '0.1.9'
+const VERSION = '0.1.10'
 
 const USAGE = `
 s3node — S3-compatible object storage server
@@ -142,8 +140,9 @@ for (const [name, value, min] of [
 
 // `--cluster` alone means one worker per core; `--cluster 4` pins the count.
 const clusterRequested = values.cluster !== undefined
+const clusterModule = clusterRequested ? await import('../src/cluster.js') : null
 const workers = clusterRequested
-  ? (values.cluster === '' ? defaultWorkerCount() : Number(values.cluster))
+  ? (values.cluster === '' ? clusterModule!.defaultWorkerCount() : Number(values.cluster))
   : 0
 if (clusterRequested && (!Number.isInteger(workers) || workers < 1)) {
   process.stderr.write('--cluster expects a positive worker count.\n')
@@ -153,10 +152,17 @@ if (clusterRequested && port === 0) {
   process.stderr.write('--port 0 cannot be used with --cluster; choose one shared port.\n')
   process.exit(1)
 }
-if (clusterRequested && !clusterSupported()) {
+if (clusterRequested && !clusterModule!.clusterSupported()) {
   process.stderr.write('Cluster mode needs Node.js 22.12 or newer (SO_REUSEPORT).\n')
   process.exit(1)
 }
+
+// Keep --help/--version and validation paths free of node:sqlite startup work.
+// This also avoids Node 22's experimental SQLite warning for informational CLI calls.
+const [{ createServer }, { ConsoleServer }] = await Promise.all([
+  import('../src/index.js'),
+  import('../src/console/server.js'),
+])
 
 const logger = values.quiet ? null : {
   error(entry: Record<string, unknown>) {
@@ -166,7 +172,7 @@ const logger = values.quiet ? null : {
 
 interface Running {
   server: S3NodeServer
-  console: ConsoleServer | null
+  console: ConsoleServerInstance | null
 }
 
 async function start({ reusePort = false, withConsole = true, withLifecycle = true } = {}): Promise<Running> {
@@ -202,7 +208,7 @@ async function start({ reusePort = false, withConsole = true, withLifecycle = tr
     })
   }
 
-  let adminConsole: ConsoleServer | null = null
+  let adminConsole: ConsoleServerInstance | null = null
   if (consolePort !== null && withConsole) {
     adminConsole = new ConsoleServer({
       store: server.store,
@@ -242,7 +248,7 @@ async function shutdown(running: Running): Promise<void> {
 
 if (clusterRequested) {
   let running: Running | null = null
-  await runCluster({
+  await clusterModule!.runCluster({
     workers,
     log: (message) => { if (!values.quiet) process.stdout.write(`${message}\n`) },
     async start({ workerId, isLifecycleWorker }) {

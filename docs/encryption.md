@@ -49,7 +49,7 @@ On read, the data key is unwrapped and used to decrypt.
 
 Both modes use AES-256-CTR (counter mode) for object data. CTR mode was chosen because it supports arbitrary byte-range reads — you can seek to any position without re-processing from the beginning.
 
-**Trade-off**: CTR provides no integrity authentication. See SECURITY.md for the full security boundary.
+**Trade-off**: CTR provides no integrity authentication. See [SECURITY.md](../SECURITY.md) for the full security boundary.
 
 ### Multipart encryption
 
@@ -63,3 +63,15 @@ SSE-C responses include:
 
 SSE-S3 responses include:
 - `x-amz-server-side-encryption: AES256`
+
+## Authenticated-content roadmap
+
+Version 0.1.10 does not change the on-disk cipher format. Existing encrypted
+objects remain range-readable AES-256-CTR objects and therefore require a
+trusted storage backend or independent client-side checksum validation.
+
+The proposed successor format uses independently authenticated fixed-size
+chunks so every covering chunk can be verified before a Range response returns
+plaintext. Its nonce construction, migration constraints, and performance
+trade-offs are documented in the
+[authenticated-content design](https://github.com/felipedsvit/s3node/wiki/Authenticated-Content-Encryption-Design).

@@ -36,6 +36,10 @@ Metadata is stored in SQLite with WAL mode. This lets readers proceed while one 
 - **Worker 1 only**: Lifecycle sweeps, admin console, metrics
 - **All workers**: S3 API request handling
 
+The metrics registry is process-local. The CLI exposes worker 1's HTTP counters
+and latency histogram, not a cluster aggregate; SQLite, notification queue,
+filesystem, and WAL gauges still represent the shared data directory.
+
 ## Graceful shutdown
 
 The primary sends a `shutdown` message to workers. Workers exit on `SIGTERM` / `SIGINT`; active HTTP requests get a 30-second grace period. A restart circuit breaker terminates the cluster after repeated worker crashes instead of spinning forever.

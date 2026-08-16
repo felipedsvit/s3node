@@ -48,6 +48,26 @@ await server.close()
 | `logger` | `{ error: (entry) => void } \| null` | `null` | Error logger |
 | `reusePort` | `boolean` | `false` | `SO_REUSEPORT` support |
 
+## Backup and restore
+
+The backup API uses a SQLite write lock while it captures a standalone database
+snapshot and the exact blob set referenced by that snapshot. The result includes
+a SHA-256 manifest and can only be restored into a new directory.
+
+```js
+import { createBackup, verifyBackup, restoreBackup } from '@felipedsvit/s3node'
+
+const manifest = await createBackup('./data', '/backups/s3node-2026-08-16')
+console.log(manifest.schemaVersion, manifest.blobCount)
+
+await verifyBackup('/backups/s3node-2026-08-16')
+await restoreBackup('/backups/s3node-2026-08-16', './restored-data')
+```
+
+`BackupManifest` is exported for TypeScript consumers. A large online backup can
+delay or reject writers that exceed SQLite's busy timeout, so schedule a
+maintenance window for production-sized datasets.
+
 ## Use in a test suite
 
 ```js
@@ -131,6 +151,9 @@ const result = await gc.collect()
 console.log(result)
 // { scanned: 100, referenced: 95, orphaned: 5, deleted: 5 }
 ```
+
+Use `server.runGarbageCollection()` instead when the server's Prometheus
+registry should record the run, duration, result, and latest counts.
 
 Blob writes are journaled before their files become visible, so `collect()` is safe to run while the server is accepting writes. A crashed write remains protected by its pending journal row. To reclaim reservations older than a known-safe window, use `gc.collect({ stalePendingBlobAgeMs: 24 * 3600_000 })`; never choose a window shorter than the longest valid write.
 

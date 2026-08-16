@@ -29,6 +29,8 @@ export { ConsoleServer } from './console/server.js'
 export type { ConsoleOptions } from './console/server.js'
 export { runCluster, clusterSupported, defaultWorkerCount } from './cluster.js'
 export type { ClusterOptions } from './cluster.js'
+export { createBackup, restoreBackup, verifyBackup } from './backup.js'
+export type { BackupManifest } from './backup.js'
 export * as sigv4 from './auth/sigv4.js'
 
 import { S3NodeServer } from './server.js'
