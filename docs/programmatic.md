@@ -34,12 +34,17 @@ await server.close()
 | `minPartSize` | `number` | `5 * 1024 * 1024` | Minimum non-final multipart part size |
 | `maxObjectSize` | `number` | `5 * 1024 * 1024 * 1024 * 1024` | Max object size (5 TiB) |
 | `maxConcurrentUploads` | `number` | `1000` | In-flight multipart uploads limit |
-| `maxConcurrentWrites` | `number` | `0` (unlimited) | Concurrent blob write limit |
+| `maxConcurrentWrites` | `number` | `64` | Concurrent blob write limit; `0` disables it |
 | `encryptionMasterKey` | `string \| Buffer \| null` | `null` | SSE-S3 master key |
 | `lifecycleIntervalMs` | `number` | `0` (off) | Lifecycle sweep interval |
 | `notificationIntervalMs` | `number` | `2000` | Notification queue poll interval (ms) |
 | `rateLimitPerSecond` | `number` | unset | Sustained request rate limit (per caller) |
 | `rateLimitBurst` | `number` | same as `rateLimitPerSecond` | Burst capacity |
+| `allowPrivateNotificationEndpoints` | `boolean` | `false` | Permit loopback/private webhook destinations |
+| `requestTimeoutMs` | `number` | `300000` | Maximum request duration |
+| `headersTimeoutMs` | `number` | `60000` | Maximum time to receive request headers |
+| `socketTimeoutMs` | `number` | `120000` | Idle socket timeout |
+| `closeGracePeriodMs` | `number` | `30000` | Grace before shutdown closes active connections |
 | `logger` | `{ error: (entry) => void } \| null` | `null` | Error logger |
 | `reusePort` | `boolean` | `false` | `SO_REUSEPORT` support |
 
@@ -124,8 +129,10 @@ console.log(report)
 // Collect orphans
 const result = await gc.collect()
 console.log(result)
-// { scanned: 100, referenced: 95, orphaned: 5, removed: 3, cleanedDirs: 2 }
+// { scanned: 100, referenced: 95, orphaned: 5, deleted: 5 }
 ```
+
+Blob writes are journaled before their files become visible, so `collect()` is safe to run while the server is accepting writes. A crashed write remains protected by its pending journal row. To reclaim reservations older than a known-safe window, use `gc.collect({ stalePendingBlobAgeMs: 24 * 3600_000 })`; never choose a window shorter than the longest valid write.
 
 ## Multipart cleanup
 

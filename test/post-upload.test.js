@@ -264,6 +264,31 @@ describe('POST object upload', () => {
     assert.equal(stored.status, 404)
   })
 
+  it('does not destroy an existing object when content-length-range rejects an overwrite', async () => {
+    await client.request({
+      method: 'PUT', bucket: BUCKET, key: 'uploads/note.txt', body: 'original',
+    })
+    const response = await post(buildForm({
+      body: randomBytes(5000),
+      extraConditions: [['content-length-range', 0, 100]],
+    }))
+    assert.equal(response.status, 400)
+    const stored = await client.request({ method: 'GET', bucket: BUCKET, key: 'uploads/note.txt' })
+    assert.equal(stored.status, 200)
+    assert.equal(stored.text, 'original')
+  })
+
+  it('rejects an unsafe success redirect before publishing the object', async () => {
+    const response = await post(buildForm({
+      extraFields: { success_action_redirect: 'javascript:alert(1)' },
+      extraConditions: [{ success_action_redirect: 'javascript:alert(1)' }],
+    }))
+    assert.equal(response.status, 400)
+    assert.equal((await client.request({
+      method: 'GET', bucket: BUCKET, key: 'uploads/note.txt',
+    })).status, 404)
+  })
+
   it('rejects a non-multipart POST', async () => {
     const response = await client.send({
       method: 'POST', path: `/${BUCKET}`,

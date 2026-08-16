@@ -25,7 +25,14 @@ npx @felipedsvit/s3node [options]
 | `--virtual-host <domain>` | --- | off | Enable `bucket.domain` addressing |
 | `--cluster [count]` | --- | off | Workers: one per core or explicit count |
 | `--console-port <port>` | --- | off | Admin console HTTP port |
+| `--max-concurrent-writes <n>` | --- | `64` | Concurrent blob writes; `0` disables the limit |
+| `--rate-limit <rps>` | --- | `1000` | Sustained requests/second per caller |
+| `--rate-limit-burst <n>` | --- | `2000` | Per-caller burst capacity |
+| `--request-timeout-ms <ms>` | --- | `300000` | Maximum request duration |
+| `--socket-timeout-ms <ms>` | --- | `120000` | Idle socket timeout |
+| `--allow-private-notification-endpoints` | --- | false | Permit loopback/private webhook targets |
 | `--quiet` | --- | false | Suppress request error logging |
+| `--version` | --- | --- | Print the installed version |
 | `--help` | --- | --- | Show usage |
 
 `--access-key` and `--secret-key` must be given together.
@@ -53,4 +60,8 @@ s3node --data-dir ./data --virtual-host s3.example.com
 
 # Quiet mode (no request error output)
 s3node --data-dir ./data --quiet
+
+# Explicit load-shedding and timeout limits
+s3node --data-dir ./data --max-concurrent-writes 32 --rate-limit 500 \
+  --rate-limit-burst 1000 --request-timeout-ms 120000
 ```

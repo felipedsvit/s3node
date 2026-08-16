@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash, randomBytes } from 'node:crypto'
-import { readFile, readdir } from 'node:fs/promises'
+import { readFile, readdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { after, before, beforeEach, describe, it } from 'node:test'
 import { EncryptionManager, advanceIv, partIv } from '../dist/src/features/encryption.js'
@@ -276,6 +276,23 @@ describe('SSE-C', () => {
 })
 
 describe('EncryptionManager', () => {
+  it('creates exactly one shared master key under concurrent startup', async () => {
+    const path = join(harness.root, 'concurrent-master-key')
+    const managers = await Promise.all(
+      Array.from({ length: 64 }, () => EncryptionManager.load(path)),
+    )
+    const keys = new Set(managers.map((manager) => manager.masterKey.toString('hex')))
+    assert.equal(keys.size, 1)
+    assert.equal((await readFile(path, 'utf8')).trim(), managers[0].masterKey.toString('base64'))
+  })
+
+  it('refuses to replace a corrupt persisted master key', async () => {
+    const path = join(harness.root, 'corrupt-master-key')
+    await writeFile(path, 'not-a-valid-key', 'utf8')
+    await assert.rejects(EncryptionManager.load(path), /refusing to replace/)
+    assert.equal(await readFile(path, 'utf8'), 'not-a-valid-key')
+  })
+
   it('unwraps an SSE-S3 data key it wrapped', () => {
     const manager = new EncryptionManager(randomBytes(32))
     const { key, context } = manager.create({ mode: 'SSE-S3' })

@@ -41,6 +41,10 @@ Uses a custom `<WebhookConfiguration>` element (not SQS/SNS/Lambda).
 - 5-second timeout per delivery
 - Max 6 delivery attempts, base backoff 1s, max backoff 60s
 - Dead-letter after max attempts (status: `dead`)
+- A 30-second claim lease recovers deliveries abandoned by a crashed worker
+- Only 2xx responses count as success; redirects are rejected
+- Loopback, link-local, and private webhook targets are blocked by default to prevent SSRF. Opt in only for trusted development networks with `allowPrivateNotificationEndpoints` or the matching CLI flag
+- Maximum 100 webhook targets per bucket
 - Payload matches S3 event format (`Records[].eventVersion: "2.1"`, `eventSource: "aws:s3"`)
 
 ## Object Lock
@@ -49,9 +53,10 @@ WORM (Write-Once-Read-Many) retention for object versions.
 
 ### Requirements
 - Bucket must have versioning enabled
+- Once enabled, Object Lock cannot be disabled and versioning cannot be suspended
 
 ### Retention modes
-- **GOVERNANCE** — can be bypassed with `x-amz-bypass-governance-retention: true`
+- **GOVERNANCE** — can be bypassed with `x-amz-bypass-governance-retention: true` only when bucket policy permits `s3:BypassGovernanceRetention`
 - **COMPLIANCE** — cannot be bypassed; truly immutable until expiry
 
 ### Legal hold

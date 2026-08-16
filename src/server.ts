@@ -22,7 +22,7 @@ import type { LifecycleSummary } from './features/lifecycle.js'
 import { NotificationDispatcher } from './features/notifications.js'
 import { evaluatePolicy, objectArn } from './features/policy.js'
 import type { PolicyDocument } from './features/policy.js'
-import { createContext, sendEmpty, sendError } from './http.js'
+import { createContext, redactUrlForLog, sendEmpty, sendError } from './http.js'
 import type { AuthInfo, RequestContext } from './http.js'
 import { MetricsRegistry } from './metrics.js'
 import { resolveRoute } from './router.js'
@@ -31,6 +31,17 @@ import type { ObjectRecord } from './storage/metadata.js'
 import { RateLimiter } from './util/rateLimiter.js'
 
 const DEFAULT_REGION = 'us-east-1'
+const DEFAULT_REQUEST_TIMEOUT_MS = 5 * 60_000
+const DEFAULT_HEADERS_TIMEOUT_MS = 60_000
+const DEFAULT_SOCKET_TIMEOUT_MS = 2 * 60_000
+const DEFAULT_CLOSE_GRACE_MS = 30_000
+
+function assertPositiveOption(name: string, value: number | undefined, { allowZero = false } = {}): void {
+  if (value === undefined) return
+  if (!Number.isFinite(value) || value < (allowZero ? 0 : 1)) {
+    throw new TypeError(`${name} must be a finite number ${allowZero ? '>= 0' : '> 0'}`)
+  }
+}
 
 /** Node grew SO_REUSEPORT support for listeners in 22.12. */
 export function supportsReusePort(): boolean {
@@ -60,6 +71,11 @@ export interface ServerOptions {
   rateLimitPerSecond?: number | undefined
   /** Burst capacity for the rate limiter; defaults to `rateLimitPerSecond` when that option is set. */
   rateLimitBurst?: number | undefined
+  allowPrivateNotificationEndpoints?: boolean | undefined
+  requestTimeoutMs?: number | undefined
+  headersTimeoutMs?: number | undefined
+  socketTimeoutMs?: number | undefined
+  closeGracePeriodMs?: number | undefined
 }
 
 export interface CreateOptions {
@@ -79,6 +95,11 @@ export interface CreateOptions {
   logger?: { error: (entry: Record<string, unknown>) => void } | null
   rateLimitPerSecond?: number
   rateLimitBurst?: number
+  allowPrivateNotificationEndpoints?: boolean
+  requestTimeoutMs?: number
+  headersTimeoutMs?: number
+  socketTimeoutMs?: number
+  closeGracePeriodMs?: number
 }
 
 export class S3NodeServer {
@@ -93,8 +114,15 @@ export class S3NodeServer {
   metrics: MetricsRegistry
   rateLimiter: RateLimiter | null
   endpoint?: string
+  closeGracePeriodMs: number
 
   constructor(options: ServerOptions) {
+    assertPositiveOption('rateLimitPerSecond', options.rateLimitPerSecond)
+    assertPositiveOption('rateLimitBurst', options.rateLimitBurst)
+    assertPositiveOption('requestTimeoutMs', options.requestTimeoutMs)
+    assertPositiveOption('headersTimeoutMs', options.headersTimeoutMs)
+    assertPositiveOption('socketTimeoutMs', options.socketTimeoutMs)
+    assertPositiveOption('closeGracePeriodMs', options.closeGracePeriodMs, { allowZero: true })
     this.store = options.store
     this.credentials = options.credentials instanceof CredentialStore ? options.credentials : new CredentialStore(options.credentials as Credential[])
     this.region = options.region ?? DEFAULT_REGION
@@ -104,6 +132,7 @@ export class S3NodeServer {
       region: this.region,
       logger: this.logger ?? undefined,
       intervalMs: options.notificationIntervalMs,
+      allowPrivateEndpoints: options.allowPrivateNotificationEndpoints,
     })
     this.lifecycleTimer = null
     this.metrics = new MetricsRegistry()
@@ -111,6 +140,14 @@ export class S3NodeServer {
       ? new RateLimiter(options.rateLimitBurst ?? options.rateLimitPerSecond, options.rateLimitPerSecond)
       : null
     this.http = createHttpServer()
+    this.http.requestTimeout = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS
+    this.http.headersTimeout = Math.min(
+      options.headersTimeoutMs ?? DEFAULT_HEADERS_TIMEOUT_MS,
+      this.http.requestTimeout,
+    )
+    this.http.timeout = options.socketTimeoutMs ?? DEFAULT_SOCKET_TIMEOUT_MS
+    this.http.maxRequestsPerSocket = 1000
+    this.closeGracePeriodMs = options.closeGracePeriodMs ?? DEFAULT_CLOSE_GRACE_MS
 
     this.http.on('request', (req: IncomingMessage, res: ServerResponse) => {
       if (req.headers.expect) return
@@ -143,17 +180,27 @@ export class S3NodeServer {
       maxConcurrentWrites: options.maxConcurrentWrites,
       encryptionMasterKey: options.encryptionMasterKey ?? null,
     })
-    return new S3NodeServer({
-      store,
-      credentials: options.credentials ?? [],
-      region: options.region,
-      virtualHostDomain: options.virtualHostDomain,
-      logger: options.logger,
-      lifecycleIntervalMs: options.lifecycleIntervalMs,
-      notificationIntervalMs: options.notificationIntervalMs,
-      rateLimitPerSecond: options.rateLimitPerSecond,
-      rateLimitBurst: options.rateLimitBurst,
-    })
+    try {
+      return new S3NodeServer({
+        store,
+        credentials: options.credentials ?? [],
+        region: options.region,
+        virtualHostDomain: options.virtualHostDomain,
+        logger: options.logger,
+        lifecycleIntervalMs: options.lifecycleIntervalMs,
+        notificationIntervalMs: options.notificationIntervalMs,
+        rateLimitPerSecond: options.rateLimitPerSecond,
+        rateLimitBurst: options.rateLimitBurst,
+        allowPrivateNotificationEndpoints: options.allowPrivateNotificationEndpoints,
+        requestTimeoutMs: options.requestTimeoutMs,
+        headersTimeoutMs: options.headersTimeoutMs,
+        socketTimeoutMs: options.socketTimeoutMs,
+        closeGracePeriodMs: options.closeGracePeriodMs,
+      })
+    } catch (err) {
+      store.close()
+      throw err
+    }
   }
 
   runLifecycle(options?: { now?: number }): Promise<LifecycleSummary> {
@@ -184,7 +231,9 @@ export class S3NodeServer {
         throw new S3Error('SlowDown', 'Request rate limit exceeded')
       }
 
-      if (!selfAuthenticating) this.authorize(ctx, route.action, route.resource as string)
+      if (!selfAuthenticating && !route.authorizeInHandler) {
+        this.authorize(ctx, route.action, route.resource as string)
+      }
 
       if (expectContinue) res.writeContinue()
 
@@ -199,11 +248,9 @@ export class S3NodeServer {
       this.logger?.error?.({
         requestId: ctx?.requestId,
         method: req.method,
-        url: req.url,
+        url: redactUrlForLog(req.url),
         code: rendered.code,
         message: rendered.message,
-        canonicalRequest: rendered.detail?.canonicalRequest,
-        stringToSign: rendered.detail?.stringToSign,
       })
     }
   }
@@ -257,11 +304,11 @@ export class S3NodeServer {
     }
   }
 
-  _conditionContext(ctx: RequestContext): Record<string, string | undefined | null> {
+  _conditionContext(ctx: RequestContext, bucket = ctx.bucket): Record<string, string | undefined | null> {
     const socket = ctx.req.socket
     // Only queried for bucket-scoped requests (ListBuckets etc. has no ctx.bucket), so
     // policies that never reference these keys don't pay for an extra aggregate query.
-    const usage = ctx.bucket ? this.store.metadata.bucketUsage(ctx.bucket) : null
+    const usage = bucket ? this.store.metadata.bucketUsage(bucket) : null
     return {
       principal: ctx.auth?.anonymous ? '*' : `arn:aws:iam::s3node:user/${ctx.auth?.accessKeyId}`,
       'aws:sourceip': (socket as import('node:net').Socket)?.remoteAddress ?? '',
@@ -280,9 +327,15 @@ export class S3NodeServer {
     }
   }
 
-  authorize(ctx: RequestContext, action: string, resource: string, overrides: Record<string, string | undefined | null> = {}): void {
-    const policy = this._bucketConfig<PolicyDocument>(ctx.bucket, 'policy')
-    const context = { ...this._conditionContext(ctx), ...overrides }
+  authorize(
+    ctx: RequestContext,
+    action: string,
+    resource: string,
+    overrides: Record<string, string | undefined | null> = {},
+    policyBucket = ctx.bucket,
+  ): void {
+    const policy = this._bucketConfig<PolicyDocument>(policyBucket, 'policy')
+    const context = { ...this._conditionContext(ctx, policyBucket), ...overrides }
     const decision = evaluatePolicy(policy, { action, resource, context })
 
     if (decision === 'Deny') throw new S3Error('AccessDenied')
@@ -378,7 +431,15 @@ export class S3NodeServer {
   async close(): Promise<void> {
     if (this.lifecycleTimer) clearInterval(this.lifecycleTimer)
     this.notifications.close()
-    await new Promise<void>((resolve) => this.http.close(() => resolve()))
+    const forced = setTimeout(() => this.http.closeAllConnections(), this.closeGracePeriodMs)
+    forced.unref?.()
+    try {
+      await new Promise<void>((resolve, reject) => {
+        this.http.close((err) => err ? reject(err) : resolve())
+      })
+    } finally {
+      clearTimeout(forced)
+    }
     await this.notifications.drain()
     this.store.close()
   }

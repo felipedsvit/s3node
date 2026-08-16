@@ -55,6 +55,8 @@ interface RouteDef {
   handler: HandlerFn
   action: string
   selfAuthenticating?: boolean
+  /** The handler authorizes each concrete resource after parsing the body. */
+  authorizeInHandler?: boolean
   /** Only set for routes where ctx.bucket is empty (e.g. ListBuckets). */
   fixedResource?: string
 }
@@ -86,7 +88,7 @@ const ROUTES: RouteDef[] = [
   { methods: ['HEAD'],        matcher: isBucketOp,                                handler: handlers.headBucket as HandlerFn,           action: 's3:ListBucket' },
 
   /* POST */
-  { methods: ['POST'],        matcher: and(isBucketOp, hasQuery('delete')),       handler: handlers.deleteObjects as HandlerFn,        action: 's3:DeleteObject' },
+  { methods: ['POST'],        matcher: and(isBucketOp, hasQuery('delete')),       handler: handlers.deleteObjects as HandlerFn,        action: 's3:DeleteObject',        authorizeInHandler: true },
   { methods: ['POST'],        matcher: isBucketOp,                                handler: handlers.postObject as HandlerFn,           action: 's3:PutObject',           selfAuthenticating: true },
 
   /* GET */
@@ -141,6 +143,7 @@ interface Route {
   action: string
   resource?: string
   selfAuthenticating?: boolean | undefined
+  authorizeInHandler?: boolean | undefined
 }
 
 export function resolveRoute(ctx: RequestContext): Route & { resource: string } {
@@ -158,7 +161,13 @@ export function resolveRoute(ctx: RequestContext): Route & { resource: string } 
     if (!def.methods.includes(ctx.method!)) continue
     if (!def.matcher(ctx)) continue
     const resource = def.fixedResource ?? (ctx.key ? objectArn(ctx.bucket, ctx.key) : bucketArn(ctx.bucket))
-    return { handler: def.handler, action: def.action, resource, selfAuthenticating: def.selfAuthenticating }
+    return {
+      handler: def.handler,
+      action: def.action,
+      resource,
+      selfAuthenticating: def.selfAuthenticating,
+      authorizeInHandler: def.authorizeInHandler,
+    }
   }
 
   throw new S3Error('MethodNotAllowed')

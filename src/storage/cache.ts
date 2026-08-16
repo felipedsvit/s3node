@@ -27,6 +27,7 @@ export class LRUCache<K, V> {
   }
 
   set(key: K, value: V): void {
+    if (this.capacity <= 0) return
     if (this.map.has(key)) {
       this.map.delete(key)
     } else if (this.map.size >= this.capacity) {

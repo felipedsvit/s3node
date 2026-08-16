@@ -21,6 +21,7 @@ export async function startServer(options = {}) {
     dataDir: join(root, 'data'),
     credentials: [CREDENTIAL, OTHER_CREDENTIAL],
     minPartSize: 16,
+    allowPrivateNotificationEndpoints: true,
     ...options,
   })
   const client = new TestClient({ endpoint: server.endpoint, ...CREDENTIAL })

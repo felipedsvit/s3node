@@ -361,4 +361,58 @@ describe('policy enforcement over HTTP', () => {
     })
     assert.equal(response.status, 403)
   })
+
+  it('authorizes the source of CopyObject and UploadPartCopy', async () => {
+    await client.request({ method: 'PUT', bucket: BUCKET, key: 'secret.txt', body: 'classified' })
+    await setPolicy({
+      Statement: [{
+        Effect: 'Deny', Principal: '*', Action: 's3:GetObject',
+        Resource: `arn:aws:s3:::${BUCKET}/secret.txt`,
+      }],
+    })
+
+    const copied = await client.request({
+      method: 'PUT', bucket: BUCKET, key: 'copy.txt',
+      headers: { 'x-amz-copy-source': `/${BUCKET}/secret.txt` },
+    })
+    assert.equal(copied.status, 403)
+    assert.equal(tag(copied.text, 'Code'), 'AccessDenied')
+
+    const created = await client.request({
+      method: 'POST', bucket: BUCKET, key: 'multipart.txt', query: { uploads: '' },
+    })
+    const part = await client.request({
+      method: 'PUT', bucket: BUCKET, key: 'multipart.txt',
+      query: { uploadId: tag(created.text, 'UploadId'), partNumber: '1' },
+      headers: { 'x-amz-copy-source': `/${BUCKET}/secret.txt` },
+    })
+    assert.equal(part.status, 403)
+    assert.equal(tag(part.text, 'Code'), 'AccessDenied')
+  })
+
+  it('authorizes every key in DeleteObjects and preserves denied objects', async () => {
+    await client.request({ method: 'PUT', bucket: BUCKET, key: 'protected.txt', body: 'keep me' })
+    await client.request({ method: 'PUT', bucket: BUCKET, key: 'ordinary.txt', body: 'delete me' })
+    await setPolicy({
+      Statement: [{
+        Effect: 'Deny', Principal: '*', Action: 's3:DeleteObject',
+        Resource: `arn:aws:s3:::${BUCKET}/protected.txt`,
+      }],
+    })
+
+    const response = await client.request({
+      method: 'POST', bucket: BUCKET, query: { delete: '' },
+      body: '<Delete><Object><Key>protected.txt</Key></Object>' +
+        '<Object><Key>ordinary.txt</Key></Object></Delete>',
+    })
+    assert.equal(response.status, 200)
+    assert.match(response.text, /<Error><Key>protected\.txt<\/Key><Code>AccessDenied<\/Code>/)
+    assert.match(response.text, /<Deleted><Key>ordinary\.txt<\/Key>/)
+    assert.equal((await client.request({ method: 'GET', bucket: BUCKET, key: 'protected.txt' })).status, 200)
+    assert.equal((await client.request({ method: 'GET', bucket: BUCKET, key: 'ordinary.txt' })).status, 404)
+
+    // Leave the shared fixture clean for subsequent runs.
+    await client.request({ method: 'DELETE', bucket: BUCKET, query: { policy: '' } })
+    await client.request({ method: 'DELETE', bucket: BUCKET, key: 'protected.txt' })
+  })
 })

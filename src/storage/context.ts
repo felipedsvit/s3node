@@ -13,7 +13,7 @@ import { S3Error } from '../errors.js'
 import type { EncryptionManager } from '../features/encryption.js'
 import { toKeyBuffer } from '../util/bytes.js'
 import { Semaphore } from '../util/semaphore.js'
-import { READ_HIGH_WATER_MARK, type BlobStore } from './blobs.js'
+import { newBlobId, READ_HIGH_WATER_MARK, type BlobStore, type BlobWriteOptions, type WriteResult } from './blobs.js'
 import type { MetadataStore } from './metadata.js'
 
 export const MAX_KEY_BYTES = 1024
@@ -21,8 +21,8 @@ export const DEFAULT_MIN_PART_SIZE = 5 * 1024 * 1024
 export const MAX_OBJECT_SIZE = 5 * 1024 * 1024 * 1024 * 1024
 export const MAX_CONCURRENT_UPLOADS = 1000
 export const MAX_PARTS = 10_000
-/** 0 keeps the write semaphore disabled, matching `maxConcurrentUploads`'s own default-off convention. */
-export const MAX_CONCURRENT_WRITES = 0
+/** Bounded by default so slow clients cannot create unbounded files/streams. Explicit 0 disables it. */
+export const MAX_CONCURRENT_WRITES = 64
 export const WRITE_SEMAPHORE_TIMEOUT_MS = 30_000
 
 export const CONFIG_NAMES = ['versioning', 'policy', 'cors', 'lifecycle', 'tagging', 'notification', 'quota']
@@ -60,6 +60,22 @@ export async function acquireWriteSlot(ctx: StoreContext): Promise<() => void> {
     return await ctx.writeSemaphore.acquire(WRITE_SEMAPHORE_TIMEOUT_MS)
   } catch {
     throw new S3Error('SlowDown', 'Too many concurrent writes')
+  }
+}
+
+/** Journals a blob before it becomes visible so online GC cannot race its metadata commit. */
+export async function writeReservedBlob(
+  ctx: StoreContext,
+  source: NodeJS.ReadableStream | NodeJS.ReadableStream[],
+  options: Omit<BlobWriteOptions, 'blobId'> = {},
+): Promise<WriteResult> {
+  const blobId = newBlobId()
+  ctx.metadata.reserveBlob(blobId)
+  try {
+    return await ctx.blobs.write(source, { ...options, blobId })
+  } catch (err) {
+    ctx.metadata.releasePendingBlob(blobId)
+    throw err
   }
 }
 

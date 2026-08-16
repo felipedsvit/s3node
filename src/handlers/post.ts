@@ -2,6 +2,7 @@ import type { ServerResponse } from 'node:http'
 import { S3Error } from '../errors.js'
 import { parseBoundary, parseFormData } from '../features/formdata.js'
 import { resolveKey, verifyPostPolicy } from '../features/postpolicy.js'
+import { lockFromHeaders } from '../features/objectlock.js'
 import { baseHeaders, sendEmpty, sendXml, type RequestContext } from '../http.js'
 import { document, text } from '../xml.js'
 import { notify } from './shared.js'
@@ -40,9 +41,33 @@ export async function postObject(ctx: RequestContext, res: ServerResponse, { sto
     throw err
   }
 
+  const redirect = fields.get('success_action_redirect') ?? fields.get('redirect')
+  let redirectTarget: URL | null = null
+  if (redirect) {
+    try {
+      redirectTarget = new URL(redirect)
+    } catch {
+      file.stream.destroy()
+      throw new S3Error('MalformedPOSTRequest', 'success_action_redirect is not a valid URL')
+    }
+    if (redirectTarget.protocol !== 'http:' && redirectTarget.protocol !== 'https:') {
+      file.stream.destroy()
+      throw new S3Error('MalformedPOSTRequest', 'success_action_redirect must use http or https')
+    }
+  }
+
   const metadata: Record<string, string> = {}
+  let metadataBytes = 0
   for (const [name, value] of fields) {
-    if (name.startsWith('x-amz-meta-')) metadata[name.slice('x-amz-meta-'.length)] = value
+    if (name.startsWith('x-amz-meta-')) {
+      const metadataName = name.slice('x-amz-meta-'.length)
+      metadataBytes += Buffer.byteLength(metadataName) + Buffer.byteLength(value)
+      if (metadataBytes > 2048) {
+        file.stream.destroy()
+        throw new S3Error('InvalidArgument', 'Total user metadata size must not exceed 2 KB')
+      }
+      metadata[metadataName] = value
+    }
   }
 
   const result = await store.putObject({
@@ -51,16 +76,12 @@ export async function postObject(ctx: RequestContext, res: ServerResponse, { sto
     body: [file.stream],
     contentType: fields.get('content-type') ?? file.contentType,
     metadata,
+    minSize: verified.range?.min,
+    maxSize: verified.range?.max,
+    lock: lockFromHeaders(Object.fromEntries(
+      [...fields].filter(([name]) => name.startsWith('x-amz-object-lock-')),
+    )),
   })
-
-  if (verified.range) {
-    const { min, max } = verified.range
-    if (result.size < min || result.size > max) {
-      await store.deleteObject(ctx.bucket, key, result.versioned ? result.versionId : null)
-      throw new S3Error('EntityTooLarge',
-        `The uploaded body must be between ${min} and ${max} bytes`)
-    }
-  }
 
   notify(server, {
     bucket: ctx.bucket, eventName: 'ObjectCreated:Post', key,
@@ -73,18 +94,11 @@ export async function postObject(ctx: RequestContext, res: ServerResponse, { sto
     ...(result.versioned && result.versionId ? { 'x-amz-version-id': result.versionId } : {}),
   }
 
-  const redirect = fields.get('success_action_redirect') ?? fields.get('redirect')
-  if (redirect) {
-    let target: URL
-    try {
-      target = new URL(redirect)
-    } catch {
-      throw new S3Error('MalformedPOSTRequest', 'success_action_redirect is not a valid URL')
-    }
-    target.searchParams.set('bucket', ctx.bucket)
-    target.searchParams.set('key', key)
-    target.searchParams.set('etag', result.etag)
-    res.writeHead(303, { ...baseHeaders(ctx), ...extraHeaders, Location: target.toString(), 'Content-Length': 0 })
+  if (redirectTarget) {
+    redirectTarget.searchParams.set('bucket', ctx.bucket)
+    redirectTarget.searchParams.set('key', key)
+    redirectTarget.searchParams.set('etag', result.etag)
+    res.writeHead(303, { ...baseHeaders(ctx), ...extraHeaders, Location: redirectTarget.toString(), 'Content-Length': 0 })
     res.end()
     return
   }

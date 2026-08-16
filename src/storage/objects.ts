@@ -18,6 +18,7 @@ import {
   checksumMismatch,
   newVersionId,
   validateKey,
+  writeReservedBlob,
   type StoreContext,
 } from './context.js'
 import { NULL_VERSION, type ObjectRecord, type ListObjectsResult, type ListVersionsResult } from './metadata.js'
@@ -55,21 +56,23 @@ export class ObjectService {
       transforms = [this.ctx.encryption.createEncryptStream(created.key, encryption, 0)]
     }
 
-    const effectiveMax = this.ctx.maxObjectSize > 0 ? this.ctx.maxObjectSize : 0
+    const configuredMax = this.ctx.maxObjectSize > 0 ? this.ctx.maxObjectSize : Infinity
+    const requestMax = input.maxSize !== undefined ? input.maxSize : Infinity
+    const effectiveMax = Math.min(configuredMax, requestMax)
+    const streamMax = Number.isFinite(effectiveMax) ? effectiveMax : 0
     const release = await acquireWriteSlot(this.ctx)
     let blobId: string, size: number, hasher: WriteResult['hasher']
     try {
-      ({ blobId, size, hasher } = await this.ctx.blobs.write(input.body, { algorithms, transforms, maxSize: effectiveMax }))
+      ({ blobId, size, hasher } = await writeReservedBlob(
+        this.ctx, input.body, { algorithms, transforms, maxSize: streamMax }))
     } finally {
       release()
     }
 
     let metadataCommitted = false
     try {
-      if (effectiveMax > 0 && size > effectiveMax) {
-        throw new S3Error('EntityTooLarge')
-      }
-      assertWithinQuota(this.ctx, input.bucket, size)
+      if (Number.isFinite(effectiveMax) && size > effectiveMax) throw new S3Error('EntityTooLarge')
+      if (input.minSize !== undefined && size < input.minSize) throw new S3Error('EntityTooSmall')
 
       const md5 = hasher.digest('md5', 'hex')
 
@@ -92,14 +95,19 @@ export class ObjectService {
 
       const etag = `"${md5}"`
       const lastModified = new Date()
-      const versioning = this.buckets.bucketVersioning(input.bucket)
-      const versionId = versioning === 'Enabled' ? newVersionId() : NULL_VERSION
-      const replaced = versionId === NULL_VERSION
-        ? this.ctx.metadata.getObject(input.bucket, input.key, NULL_VERSION)
-        : null
-      const lock = this.resolveNewObjectLock(input.bucket, input.lock)
+      let versioning = 'Unset'
+      let versionId = NULL_VERSION
+      let replaced: ObjectRecord | null = null
 
       this.ctx.metadata.transaction(() => {
+        this.buckets.requireBucket(input.bucket)
+        assertWithinQuota(this.ctx, input.bucket, size)
+        versioning = this.buckets.bucketVersioning(input.bucket)
+        versionId = versioning === 'Enabled' ? newVersionId() : NULL_VERSION
+        replaced = versionId === NULL_VERSION
+          ? this.ctx.metadata.getObject(input.bucket, input.key, NULL_VERSION)
+          : null
+        const lock = this.resolveNewObjectLock(input.bucket, input.lock)
         this.ctx.metadata.clearLatest(input.bucket, input.key)
         this.ctx.metadata.putObject({
           bucket: input.bucket, key: input.key, versionId, isLatest: true, isDeleteMarker: false,
@@ -107,6 +115,7 @@ export class ObjectService {
           blobId, parts: null, metadata: input.metadata ?? {}, checksums, tags: input.tags ?? {},
           encryption, ...lock,
         })
+        this.ctx.metadata.releasePendingBlob(blobId)
       })
       metadataCommitted = true
 
@@ -114,7 +123,10 @@ export class ObjectService {
 
       return { etag, size, lastModified, checksums, versionId, versioned: versioning === 'Enabled', encryption }
     } catch (err) {
-      if (!metadataCommitted) await this.ctx.blobs.remove(blobId)
+      if (!metadataCommitted) {
+        this.ctx.metadata.releasePendingBlob(blobId)
+        await this.ctx.blobs.remove(blobId)
+      }
       throw err
     }
   }
@@ -185,47 +197,55 @@ export class ObjectService {
   }
 
   async deleteObject(bucket: string, key: string, versionId?: string | null, { bypassGovernance = false } = {}): Promise<DeleteObjectResult> {
-    this.buckets.requireBucket(bucket)
-    const versioning = this.buckets.bucketVersioning(bucket)
-
     if (versionId) {
-      const record = this.ctx.metadata.getObject(bucket, key, versionId)
-      if (!record) return { deleted: false }
-      // Object Lock only ever protects a concrete version. Deleting the "current"
-      // object in a versioned bucket just writes a delete marker, which hides the
-      // data without destroying it, so that path stays open.
-      assertVersionDeletable(record, { bypassGovernance })
+      const selected: { record: ObjectRecord | null } = { record: null }
       this.ctx.metadata.transaction(() => {
+        this.buckets.requireBucket(bucket)
+        const record = this.ctx.metadata.getObject(bucket, key, versionId)
+        if (!record) return
+        // Check and delete under the same cross-process write lock.
+        assertVersionDeletable(record, { bypassGovernance })
         this.ctx.metadata.deleteVersion(bucket, key, versionId)
         if (record.isLatest) this.ctx.metadata.promoteLatest(bucket, key)
+        selected.record = record
       })
+      const record = selected.record
+      if (!record) return { deleted: false }
       await this.releaseObjectBlobs(record)
       return { deleted: true, versionId, deleteMarker: record.isDeleteMarker }
     }
 
-    if (versioning === 'Enabled' || versioning === 'Suspended') {
-      const markerVersion = versioning === 'Enabled' ? newVersionId() : NULL_VERSION
-      const replaced = markerVersion === NULL_VERSION
-        ? this.ctx.metadata.getObject(bucket, key, NULL_VERSION)
-        : null
-      this.ctx.metadata.transaction(() => {
+    let markerVersion: string | null = null
+    let replaced: ObjectRecord | null = null
+    let removed: ObjectRecord | null = null
+    this.ctx.metadata.transaction(() => {
+      this.buckets.requireBucket(bucket)
+      const versioning = this.buckets.bucketVersioning(bucket)
+      if (versioning === 'Enabled' || versioning === 'Suspended') {
+        markerVersion = versioning === 'Enabled' ? newVersionId() : NULL_VERSION
+        replaced = markerVersion === NULL_VERSION
+          ? this.ctx.metadata.getObject(bucket, key, NULL_VERSION)
+          : null
         this.ctx.metadata.clearLatest(bucket, key)
         this.ctx.metadata.putObject({
           bucket, key, versionId: markerVersion, isLatest: true, isDeleteMarker: true,
           size: 0, etag: '', lastModified: new Date(), blobId: null,
         })
-      })
+        return
+      }
+      removed = this.ctx.metadata.getObject(bucket, key)
+      if (!removed) return
+      // Without versioning a plain DELETE destroys the only copy, so the lock applies.
+      assertVersionDeletable(removed, { bypassGovernance })
+      this.ctx.metadata.deleteVersion(bucket, key, removed.versionId)
+    })
+
+    if (markerVersion !== null) {
       if (replaced) await this.releaseObjectBlobs(replaced)
       return { deleted: true, versionId: markerVersion, deleteMarker: true }
     }
-
-    const record = this.ctx.metadata.getObject(bucket, key)
-    if (!record) return { deleted: false }
-    // Without versioning a plain DELETE destroys the only copy, so the lock
-    // applies here exactly as it does to an explicit version delete.
-    assertVersionDeletable(record, { bypassGovernance })
-    this.ctx.metadata.deleteVersion(bucket, key, record.versionId)
-    await this.releaseObjectBlobs(record)
+    if (!removed) return { deleted: false }
+    await this.releaseObjectBlobs(removed)
     return { deleted: true }
   }
 
@@ -250,23 +270,29 @@ export class ObjectService {
     const copyRelease = await acquireWriteSlot(this.ctx)
     let blobId: string, size: number, hasher: WriteResult['hasher']
     try {
-      ({ blobId, size, hasher } = await this.ctx.blobs.write(plaintext, { algorithms: ['md5'], transforms, maxSize: effectiveMax }))
+      ({ blobId, size, hasher } = await writeReservedBlob(
+        this.ctx, plaintext, { algorithms: ['md5'], transforms, maxSize: effectiveMax }))
     } finally {
       copyRelease()
     }
     let metadataCommitted = false
     try {
       if (effectiveMax > 0 && size > effectiveMax) throw new S3Error('EntityTooLarge')
-      assertWithinQuota(this.ctx, input.bucket, size)
       const etag = `"${hasher.digest('md5', 'hex')}"`
       const lastModified = new Date()
-      const versioning = this.buckets.bucketVersioning(input.bucket)
-      const versionId = versioning === 'Enabled' ? newVersionId() : NULL_VERSION
-      const replaced = versionId === NULL_VERSION
-        ? this.ctx.metadata.getObject(input.bucket, input.key, NULL_VERSION)
-        : null
+      let versioning = 'Unset'
+      let versionId = NULL_VERSION
+      let replaced: ObjectRecord | null = null
 
       this.ctx.metadata.transaction(() => {
+        this.buckets.requireBucket(input.bucket)
+        assertWithinQuota(this.ctx, input.bucket, size)
+        versioning = this.buckets.bucketVersioning(input.bucket)
+        versionId = versioning === 'Enabled' ? newVersionId() : NULL_VERSION
+        replaced = versionId === NULL_VERSION
+          ? this.ctx.metadata.getObject(input.bucket, input.key, NULL_VERSION)
+          : null
+        const lock = this.resolveNewObjectLock(input.bucket, input.lock)
         this.ctx.metadata.clearLatest(input.bucket, input.key)
         this.ctx.metadata.putObject({
           bucket: input.bucket, key: input.key, versionId, isLatest: true, isDeleteMarker: false,
@@ -277,13 +303,18 @@ export class ObjectService {
           checksums: {},
           tags: input.replaceTags ? (input.tags ?? {}) : source.tags,
           encryption,
+          ...lock,
         })
+        this.ctx.metadata.releasePendingBlob(blobId)
       })
       metadataCommitted = true
       if (replaced) await this.releaseObjectBlobs(replaced)
       return { etag, lastModified, size, versionId, versioned: versioning === 'Enabled', encryption }
     } catch (err) {
-      if (!metadataCommitted) await this.ctx.blobs.remove(blobId)
+      if (!metadataCommitted) {
+        this.ctx.metadata.releasePendingBlob(blobId)
+        await this.ctx.blobs.remove(blobId)
+      }
       throw err
     }
   }
@@ -309,8 +340,11 @@ export class ObjectService {
   }
 
   /** Merges explicit lock headers over the bucket's default retention. */
-  private resolveNewObjectLock(bucket: string, requested?: Partial<LockState> | null): Partial<LockState> {
+  resolveNewObjectLock(bucket: string, requested?: Partial<LockState> | null): Partial<LockState> {
     const config = this.buckets.getBucketConfig<ObjectLockConfig>(bucket, 'object-lock')
+    if (requested && Object.keys(requested).length > 0 && !config?.enabled) {
+      throw new S3Error('InvalidRequest', 'Object Lock headers require Object Lock to be enabled on the bucket')
+    }
     const defaults = applyDefaultRetention(config)
     return { ...defaults, ...(requested ?? {}) }
   }
@@ -327,25 +361,33 @@ export class ObjectService {
   /** Sets retention on one version, refusing to weaken an active COMPLIANCE lock. */
   setRetention(bucket: string, key: string, versionId: string | null | undefined, retention: Retention, { bypassGovernance = false } = {}): string {
     this.requireLockEnabled(bucket)
-    const record = this.getObject(bucket, key, versionId)
-    assertRetentionReplaceable(record, retention, { bypassGovernance })
-    this.ctx.metadata.setLock(bucket, key, record.versionId, {
-      retentionMode: retention.mode,
-      retainUntil: retention.retainUntil,
-      legalHold: record.legalHold,
+    let resolvedVersion = ''
+    this.ctx.metadata.transaction(() => {
+      const record = this.getObject(bucket, key, versionId)
+      assertRetentionReplaceable(record, retention, { bypassGovernance })
+      this.ctx.metadata.setLock(bucket, key, record.versionId, {
+        retentionMode: retention.mode,
+        retainUntil: retention.retainUntil,
+        legalHold: record.legalHold,
+      })
+      resolvedVersion = record.versionId
     })
-    return record.versionId
+    return resolvedVersion
   }
 
   setLegalHold(bucket: string, key: string, versionId: string | null | undefined, held: boolean): string {
     this.requireLockEnabled(bucket)
-    const record = this.getObject(bucket, key, versionId)
-    this.ctx.metadata.setLock(bucket, key, record.versionId, {
-      retentionMode: record.retentionMode,
-      retainUntil: record.retainUntil,
-      legalHold: held,
+    let resolvedVersion = ''
+    this.ctx.metadata.transaction(() => {
+      const record = this.getObject(bucket, key, versionId)
+      this.ctx.metadata.setLock(bucket, key, record.versionId, {
+        retentionMode: record.retentionMode,
+        retainUntil: record.retainUntil,
+        legalHold: held,
+      })
+      resolvedVersion = record.versionId
     })
-    return record.versionId
+    return resolvedVersion
   }
 
   private requireLockEnabled(bucket: string): void {

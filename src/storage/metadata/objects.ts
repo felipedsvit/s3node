@@ -23,7 +23,7 @@ interface ObjectStatements {
   promoteLatest: ReturnType<DatabaseSync['prepare']>
   deleteVersion: ReturnType<DatabaseSync['prepare']>
   updateTags: ReturnType<DatabaseSync['prepare']>
-  maxSequence: ReturnType<DatabaseSync['prepare']>
+  nextSequence: ReturnType<DatabaseSync['prepare']>
   scanLatest: ReturnType<DatabaseSync['prepare']>
   scanLatestRange: ReturnType<DatabaseSync['prepare']>
   scanVersions: ReturnType<DatabaseSync['prepare']>
@@ -38,7 +38,6 @@ interface ObjectStatements {
 /** Object CRUD, versioning, and the key-listing engine (`listObjects`/`listVersions`). */
 export class ObjectMetadata {
   private statements: ObjectStatements
-  private _sequence: number
 
   constructor(db: DatabaseSync) {
     this.statements = {
@@ -76,7 +75,8 @@ export class ObjectMetadata {
         'DELETE FROM objects WHERE bucket = ? AND key = ? AND version_id = ?'),
       updateTags: db.prepare(
         'UPDATE objects SET tags = ? WHERE bucket = ? AND key = ? AND version_id = ?'),
-      maxSequence: db.prepare('SELECT IFNULL(MAX(sequence), 0) AS value FROM objects'),
+      nextSequence: db.prepare(
+        'UPDATE metadata_sequence SET value = MAX(value + 1, ?) WHERE id = 1 RETURNING value'),
 
       scanLatest: db.prepare(`
         SELECT * FROM objects
@@ -102,12 +102,10 @@ export class ObjectMetadata {
         SELECT * FROM objects WHERE bucket = ? AND last_modified < ? ORDER BY key ASC`),
     }
 
-    this._sequence = (this.statements.maxSequence.get() as unknown as MaxSeqRow).value
   }
 
   nextSequence(): number {
-    this._sequence = Math.max(this._sequence + 1, Date.now())
-    return this._sequence
+    return (this.statements.nextSequence.get(Date.now()) as unknown as MaxSeqRow).value
   }
 
   putObject(record: ObjectInput): void {

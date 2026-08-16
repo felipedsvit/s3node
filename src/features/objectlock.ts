@@ -84,10 +84,14 @@ export function objectLockConfigXml(config: ObjectLockConfig): string {
 export function parseRetentionXml(body: string | Buffer): Retention {
   const root = parseXml(body)
   if (root.name !== 'Retention') throw new S3Error('MalformedXML', 'Expected a Retention element')
-  return {
+  const retention = {
     mode: assertMode(childText(root, 'Mode')),
     retainUntil: parseDate(childText(root, 'RetainUntilDate'), 'RetainUntilDate'),
   }
+  if (retention.retainUntil.getTime() <= Date.now()) {
+    throw new S3Error('InvalidRequest', 'RetainUntilDate must be in the future')
+  }
+  return retention
 }
 
 export function retentionXml(lock: LockState): string {
@@ -126,6 +130,9 @@ export function lockFromHeaders(headers: Record<string, string | string[] | unde
   if (mode !== undefined) {
     state.retentionMode = assertMode(String(mode))
     state.retainUntil = parseDate(String(until), 'x-amz-object-lock-retain-until-date')
+    if (state.retainUntil.getTime() <= Date.now()) {
+      throw new S3Error('InvalidRequest', 'x-amz-object-lock-retain-until-date must be in the future')
+    }
   }
   if (hold !== undefined) {
     const value = String(hold).toUpperCase()

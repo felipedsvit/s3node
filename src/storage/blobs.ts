@@ -28,6 +28,17 @@ export interface WriteResult {
   hasher: HashingStream
 }
 
+export interface BlobWriteOptions {
+  algorithms?: string[]
+  transforms?: NodeJS.ReadWriteStream[]
+  maxSize?: number
+  blobId?: string
+}
+
+export function newBlobId(): string {
+  return randomUUID().replaceAll('-', '')
+}
+
 export type { BlobPart }
 
 export class BlobStore {
@@ -50,8 +61,9 @@ export class BlobStore {
     return join(this.dataDir, blobId.slice(0, 2), blobId.slice(2, 4), blobId)
   }
 
-  async write(source: NodeJS.ReadableStream | NodeJS.ReadableStream[], { algorithms = ['md5'], transforms = [] as NodeJS.ReadWriteStream[], maxSize = 0 } = {}): Promise<WriteResult> {
-    const blobId = randomUUID().replaceAll('-', '')
+  async write(source: NodeJS.ReadableStream | NodeJS.ReadableStream[], {
+    algorithms = ['md5'], transforms = [], maxSize = 0, blobId = newBlobId(),
+  }: BlobWriteOptions = {}): Promise<WriteResult> {
     const finalPath = this.path(blobId)
     const tmpPath = join(dirname(finalPath), `.${blobId}.tmp-${Date.now()}`)
     const hasher = new HashingStream(algorithms)

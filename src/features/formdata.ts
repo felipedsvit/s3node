@@ -1,5 +1,6 @@
 import { PassThrough, type Writable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
+import { once } from 'node:events'
 import { S3Error } from '../errors.js'
 
 const MAX_HEADER_BYTES = 8192
@@ -104,13 +105,6 @@ async function pumpFile(scanner: Scanner, delimiter: Buffer, out: Writable): Pro
       return
     }
   }
-}
-
-function once(emitter: NodeJS.EventEmitter, event: string | symbol): Promise<void> {
-  return new Promise((resolve, reject) => {
-    emitter.once(event, resolve)
-    emitter.once('error', reject)
-  })
 }
 
 function sourceIterator(sources: NodeJS.ReadableStream[]): AsyncIterator<Buffer> {

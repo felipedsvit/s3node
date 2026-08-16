@@ -96,6 +96,21 @@ describe('object lock over HTTP', () => {
     assert.equal(tag(got.text, 'ObjectLockEnabled'), 'Enabled')
   })
 
+  it('does not allow Object Lock to be disabled or versioning to be suspended', async () => {
+    const disabled = await client.request({
+      method: 'PUT', bucket: BUCKET, query: { 'object-lock': '' },
+      body: '<ObjectLockConfiguration><ObjectLockEnabled>Disabled</ObjectLockEnabled></ObjectLockConfiguration>',
+    })
+    assert.equal(disabled.status, 400)
+
+    const suspended = await client.request({
+      method: 'PUT', bucket: BUCKET, query: { versioning: '' },
+      body: '<VersioningConfiguration><Status>Suspended</Status></VersioningConfiguration>',
+    })
+    assert.equal(suspended.status, 409)
+    assert.equal(tag(suspended.text, 'Code'), 'InvalidBucketState')
+  })
+
   it('refuses to enable Object Lock on an unversioned bucket', async () => {
     const plain = `plain-bucket-${counter++}`
     await client.request({ method: 'PUT', bucket: plain })
@@ -138,6 +153,26 @@ describe('object lock over HTTP', () => {
       headers: { 'x-amz-bypass-governance-retention': 'true' },
     })
     assert.equal(bypassed.status, 204)
+  })
+
+  it('requires s3:BypassGovernanceRetention permission for a bypass header', async () => {
+    const stored = await put('policy-gov.txt')
+    const versionId = stored.headers['x-amz-version-id']
+    await setRetention('policy-gov.txt', versionId, 'GOVERNANCE', inDays(1))
+    await client.request({
+      method: 'PUT', bucket: BUCKET, query: { policy: '' },
+      body: JSON.stringify({ Statement: [{
+        Effect: 'Deny', Principal: '*', Action: 's3:BypassGovernanceRetention',
+        Resource: `arn:aws:s3:::${BUCKET}/policy-gov.txt`,
+      }] }),
+    })
+
+    const denied = await client.request({
+      method: 'DELETE', bucket: BUCKET, key: 'policy-gov.txt', query: { versionId },
+      headers: { 'x-amz-bypass-governance-retention': 'true' },
+    })
+    assert.equal(denied.status, 403)
+    assert.equal(tag(denied.text, 'Code'), 'AccessDenied')
   })
 
   it('refuses to delete a version under COMPLIANCE even with the bypass', async () => {
@@ -190,8 +225,50 @@ describe('object lock over HTTP', () => {
     assert.equal(head.headers['x-amz-object-lock-legal-hold'], 'ON')
   })
 
+  it('applies Object Lock to copies and multipart completions', async () => {
+    await client.request({
+      method: 'PUT', bucket: BUCKET, query: { 'object-lock': '' },
+      body: '<ObjectLockConfiguration><ObjectLockEnabled>Enabled</ObjectLockEnabled>' +
+        '<Rule><DefaultRetention><Mode>GOVERNANCE</Mode><Days>1</Days>' +
+        '</DefaultRetention></Rule></ObjectLockConfiguration>',
+    })
+    await put('source.txt')
+    const copied = await client.request({
+      method: 'PUT', bucket: BUCKET, key: 'copy.txt',
+      headers: { 'x-amz-copy-source': `/${BUCKET}/source.txt` },
+    })
+    assert.equal(copied.status, 200)
+    const copyHead = await client.request({ method: 'HEAD', bucket: BUCKET, key: 'copy.txt' })
+    assert.equal(copyHead.headers['x-amz-object-lock-mode'], 'GOVERNANCE')
+
+    const created = await client.request({
+      method: 'POST', bucket: BUCKET, key: 'multipart.txt', query: { uploads: '' },
+      headers: { 'x-amz-object-lock-legal-hold': 'ON' },
+    })
+    const uploadId = tag(created.text, 'UploadId')
+    const part = await client.request({
+      method: 'PUT', bucket: BUCKET, key: 'multipart.txt',
+      query: { uploadId, partNumber: '1' }, body: 'part',
+    })
+    await client.request({
+      method: 'POST', bucket: BUCKET, key: 'multipart.txt', query: { uploadId },
+      body: `<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>${part.headers.etag}</ETag></Part></CompleteMultipartUpload>`,
+    })
+    const multipartHead = await client.request({ method: 'HEAD', bucket: BUCKET, key: 'multipart.txt' })
+    assert.equal(multipartHead.headers['x-amz-object-lock-mode'], 'GOVERNANCE')
+    assert.equal(multipartHead.headers['x-amz-object-lock-legal-hold'], 'ON')
+  })
+
   it('rejects a mode without a retain-until date', async () => {
     const response = await put('bad.txt', 'data', { 'x-amz-object-lock-mode': 'GOVERNANCE' })
+    assert.equal(response.status, 400)
+    assert.equal(tag(response.text, 'Code'), 'InvalidRequest')
+  })
+
+  it('rejects a retention date that is not in the future', async () => {
+    const stored = await put('past.txt')
+    const response = await setRetention(
+      'past.txt', stored.headers['x-amz-version-id'], 'GOVERNANCE', new Date(Date.now() - 1000).toISOString())
     assert.equal(response.status, 400)
     assert.equal(tag(response.text, 'Code'), 'InvalidRequest')
   })

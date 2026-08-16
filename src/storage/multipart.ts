@@ -12,6 +12,7 @@ import {
   checksumMismatch,
   newVersionId,
   validateKey,
+  writeReservedBlob,
   type StoreContext,
 } from './context.js'
 import { NULL_VERSION, type PartRecord, type UploadRecord } from './metadata.js'
@@ -42,16 +43,19 @@ export class MultipartService {
     private readonly objects: ObjectService,
   ) {}
 
-  createMultipartUpload({ bucket, key, contentType, metadata = {}, tags = {}, encryptionRequest = null }: CreateMultipartInput): CreateMultipartResult {
-    this.buckets.requireBucket(bucket)
+  createMultipartUpload({ bucket, key, contentType, metadata = {}, tags = {}, encryptionRequest = null, lock: requestedLock = null }: CreateMultipartInput): CreateMultipartResult {
     validateKey(key)
-    if (this.ctx.maxConcurrentUploads > 0 && this.ctx.metadata.uploadCount(bucket) >= this.ctx.maxConcurrentUploads) {
-      throw new S3Error('SlowDown', `Too many concurrent multipart uploads for bucket ${bucket}`)
-    }
     const uploadId = randomUUID().replaceAll('-', '')
     const encryption = encryptionRequest ? this.ctx.encryption.create(encryptionRequest).context : null
-    this.ctx.metadata.createUpload({
-      uploadId, bucket, key, contentType, metadata, tags, encryption,
+    this.ctx.metadata.transaction(() => {
+      this.buckets.requireBucket(bucket)
+      if (this.ctx.maxConcurrentUploads > 0 && this.ctx.metadata.uploadCount(bucket) >= this.ctx.maxConcurrentUploads) {
+        throw new S3Error('SlowDown', `Too many concurrent multipart uploads for bucket ${bucket}`)
+      }
+      const lock = this.objects.resolveNewObjectLock(bucket, requestedLock)
+      this.ctx.metadata.createUpload({
+        uploadId, bucket, key, contentType, metadata, tags, encryption, lock,
+      })
     })
     return { uploadId, encryption }
   }
@@ -85,7 +89,8 @@ export class MultipartService {
     const release = await acquireWriteSlot(this.ctx)
     let blobId: string, size: number, hasher: WriteResult['hasher']
     try {
-      ({ blobId, size, hasher } = await this.ctx.blobs.write(input.body, { algorithms, transforms, maxSize: effectiveMax }))
+      ({ blobId, size, hasher } = await writeReservedBlob(
+        this.ctx, input.body, { algorithms, transforms, maxSize: effectiveMax }))
     } finally {
       release()
     }
@@ -103,13 +108,23 @@ export class MultipartService {
       }
 
       const etag = `"${hasher.digest('md5', 'hex')}"`
-      const previous = this.ctx.metadata.getPart(input.uploadId, input.partNumber)
-      this.ctx.metadata.putPart({ uploadId: input.uploadId, partNumber: input.partNumber, size, etag, blobId })
+      const previous: { value: PartRecord | null } = { value: null }
+      this.ctx.metadata.transaction(() => {
+        this.requireUpload(input.uploadId, input.bucket, input.key)
+        previous.value = this.ctx.metadata.getPart(input.uploadId, input.partNumber)
+        if (!this.ctx.metadata.putPart({ uploadId: input.uploadId, partNumber: input.partNumber, size, etag, blobId })) {
+          throw new S3Error('NoSuchUpload')
+        }
+        this.ctx.metadata.releasePendingBlob(blobId)
+      })
       metadataCommitted = true
-      if (previous) await this.ctx.blobs.remove(previous.blobId)
+      if (previous.value) await this.ctx.blobs.remove(previous.value.blobId)
       return { etag, size, encryption: uploadEncryption }
     } catch (err) {
-      if (!metadataCommitted) await this.ctx.blobs.remove(blobId)
+      if (!metadataCommitted) {
+        this.ctx.metadata.releasePendingBlob(blobId)
+        await this.ctx.blobs.remove(blobId)
+      }
       throw err
     }
   }
@@ -147,7 +162,7 @@ export class MultipartService {
     const copyRelease = await acquireWriteSlot(this.ctx)
     let blobId: string, size: number, hasher: WriteResult['hasher']
     try {
-      ({ blobId, size, hasher } = await this.ctx.blobs.write(plaintext, {
+      ({ blobId, size, hasher } = await writeReservedBlob(this.ctx, plaintext, {
         algorithms: ['md5'], transforms, maxSize: effectiveMax,
       }))
     } finally {
@@ -157,10 +172,17 @@ export class MultipartService {
     let metadataCommitted = false
     try {
       const etag = `"${hasher.digest('md5', 'hex')}"`
-      const previous = this.ctx.metadata.getPart(input.uploadId, input.partNumber)
-      this.ctx.metadata.putPart({ uploadId: input.uploadId, partNumber: input.partNumber, size, etag, blobId })
+      const previous: { value: PartRecord | null } = { value: null }
+      this.ctx.metadata.transaction(() => {
+        this.requireUpload(input.uploadId, input.bucket, input.key)
+        previous.value = this.ctx.metadata.getPart(input.uploadId, input.partNumber)
+        if (!this.ctx.metadata.putPart({ uploadId: input.uploadId, partNumber: input.partNumber, size, etag, blobId })) {
+          throw new S3Error('NoSuchUpload')
+        }
+        this.ctx.metadata.releasePendingBlob(blobId)
+      })
       metadataCommitted = true
-      if (previous) await this.ctx.blobs.remove(previous.blobId)
+      if (previous.value) await this.ctx.blobs.remove(previous.value.blobId)
       return {
         etag,
         size,
@@ -169,7 +191,10 @@ export class MultipartService {
         sourceVersionId: source.versionId === NULL_VERSION ? null : source.versionId,
       }
     } catch (err) {
-      if (!metadataCommitted) await this.ctx.blobs.remove(blobId)
+      if (!metadataCommitted) {
+        this.ctx.metadata.releasePendingBlob(blobId)
+        await this.ctx.blobs.remove(blobId)
+      }
       throw err
     }
   }
@@ -215,27 +240,31 @@ export class MultipartService {
   }
 
   async completeMultipartUpload(input: CompleteMultipartInput): Promise<PutObjectResult> {
-    const upload = this.requireUpload(input.uploadId, input.bucket, input.key)
     if (!input.requestedParts.length) throw new S3Error('InvalidRequest', 'You must specify at least one part')
-
-    const stored = new Map<number, PartRecord>(
-      this.ctx.metadata.allParts(input.uploadId).map((part) => [part.partNumber, part]))
-    const manifest = this.buildManifest(input, stored)
-
-    const size = manifest.reduce((total, part) => total + part.size, 0)
-    if (this.ctx.maxObjectSize > 0 && size > this.ctx.maxObjectSize) {
-      throw new S3Error('EntityTooLarge')
-    }
-    assertWithinQuota(this.ctx, input.bucket, size)
-    const etag = `"${multipartEtag(manifest.map((part) => part.etag.replaceAll('"', '')))}"`
+    let upload: UploadRecord | null = null
+    let stored = new Map<number, PartRecord>()
+    let manifest: BlobPart[] = []
+    let size = 0
+    let etag = ''
     const lastModified = new Date()
-    const versioning = this.buckets.bucketVersioning(input.bucket)
-    const versionId = versioning === 'Enabled' ? newVersionId() : NULL_VERSION
-    const replaced = versionId === NULL_VERSION
-      ? this.ctx.metadata.getObject(input.bucket, input.key, NULL_VERSION)
-      : null
+    let versioning = 'Unset'
+    let versionId = NULL_VERSION
+    let replaced: import('./metadata.js').ObjectRecord | null = null
 
     this.ctx.metadata.transaction(() => {
+      upload = this.requireUpload(input.uploadId, input.bucket, input.key)
+      stored = new Map<number, PartRecord>(
+        this.ctx.metadata.allParts(input.uploadId).map((part) => [part.partNumber, part]))
+      manifest = this.buildManifest(input, stored)
+      size = manifest.reduce((total, part) => total + part.size, 0)
+      if (this.ctx.maxObjectSize > 0 && size > this.ctx.maxObjectSize) throw new S3Error('EntityTooLarge')
+      assertWithinQuota(this.ctx, input.bucket, size)
+      etag = `"${multipartEtag(manifest.map((part) => part.etag.replaceAll('"', '')))}"`
+      versioning = this.buckets.bucketVersioning(input.bucket)
+      versionId = versioning === 'Enabled' ? newVersionId() : NULL_VERSION
+      replaced = versionId === NULL_VERSION
+        ? this.ctx.metadata.getObject(input.bucket, input.key, NULL_VERSION)
+        : null
       this.ctx.metadata.clearLatest(input.bucket, input.key)
       this.ctx.metadata.putObject({
         bucket: input.bucket, key: input.key, versionId, isLatest: true, isDeleteMarker: false,
@@ -244,6 +273,8 @@ export class MultipartService {
         blobId: null, parts: manifest,
         metadata: upload.metadata, checksums: {},
         tags: upload.tags, encryption: upload.encryption,
+        retentionMode: upload.retentionMode, retainUntil: upload.retainUntil,
+        legalHold: upload.legalHold,
       })
       this.ctx.metadata.deleteUpload(input.uploadId)
     })
@@ -256,14 +287,17 @@ export class MultipartService {
     return {
       etag, size, lastModified, checksums: {}, versionId,
       versioned: versioning === 'Enabled',
-      encryption: upload.encryption,
+      encryption: upload!.encryption,
     }
   }
 
   async abortMultipartUpload(input: AbortMultipartInput): Promise<void> {
-    this.requireUpload(input.uploadId, input.bucket, input.key)
-    const parts = this.ctx.metadata.allParts(input.uploadId)
-    this.ctx.metadata.deleteUpload(input.uploadId)
+    let parts: PartRecord[] = []
+    this.ctx.metadata.transaction(() => {
+      this.requireUpload(input.uploadId, input.bucket, input.key)
+      parts = this.ctx.metadata.allParts(input.uploadId)
+      this.ctx.metadata.deleteUpload(input.uploadId)
+    })
     await this.ctx.blobs.removeMany(parts.map((part) => part.blobId))
   }
 }

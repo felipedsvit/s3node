@@ -24,6 +24,7 @@ import {
   type RequestContext,
 } from '../http.js'
 import { document, text } from '../xml.js'
+import { objectArn } from '../features/policy.js'
 import { checksumHeaders, integrityOptions, notify, parseCopySource, sseRequest, versionHeaders } from './shared.js'
 import type { S3NodeServer } from '../server.js'
 import type { ObjectStore } from '../storage/store.js'
@@ -63,6 +64,8 @@ export async function copyObject(ctx: RequestContext, res: ServerResponse, { sto
   const { bucket: sourceBucket, key: sourceKey, versionId: sourceVersionId } =
     parseCopySource(ctx.headers['x-amz-copy-source'])
 
+  server.authorize(ctx, 's3:GetObject', objectArn(sourceBucket, sourceKey), {}, sourceBucket)
+
   const metadataDirective = String(ctx.headers['x-amz-metadata-directive'] ?? 'COPY').toUpperCase()
   const taggingDirective = String(ctx.headers['x-amz-tagging-directive'] ?? 'COPY').toUpperCase()
 
@@ -79,6 +82,7 @@ export async function copyObject(ctx: RequestContext, res: ServerResponse, { sto
     tags: parseTaggingHeader(ctx.headers['x-amz-tagging'] as string | undefined),
     sourceEncryptionRequest: sseRequest(ctx, store, { copySource: true }),
     encryptionRequest: sseRequest(ctx, store),
+    lock: lockFromHeaders(ctx.headers as Record<string, string | string[] | undefined>),
   })
 
   notify(server, {
@@ -189,6 +193,9 @@ export function headObject(ctx: RequestContext, res: ServerResponse, { store }: 
 }
 
 export async function deleteObject(ctx: RequestContext, res: ServerResponse, { store, server }: { store: ObjectStore; server: S3NodeServer }): Promise<void> {
+  if (bypassGovernance(ctx)) {
+    server.authorize(ctx, 's3:BypassGovernanceRetention', objectArn(ctx.bucket, ctx.key))
+  }
   const result = await store.deleteObject(ctx.bucket, ctx.key, requestedVersionId(ctx),
     { bypassGovernance: bypassGovernance(ctx) })
 
@@ -232,8 +239,11 @@ export function getObjectRetention(ctx: RequestContext, res: ServerResponse, { s
   sendXml(ctx, res, 200, retentionXml(lock))
 }
 
-export async function putObjectRetention(ctx: RequestContext, res: ServerResponse, { store }: { store: ObjectStore }): Promise<void> {
+export async function putObjectRetention(ctx: RequestContext, res: ServerResponse, { store, server }: { store: ObjectStore; server: S3NodeServer }): Promise<void> {
   const retention = parseRetentionXml(await collectBody(ctx.bodyStreams))
+  if (bypassGovernance(ctx)) {
+    server.authorize(ctx, 's3:BypassGovernanceRetention', objectArn(ctx.bucket, ctx.key))
+  }
   const versionId = store.setRetention(ctx.bucket, ctx.key, requestedVersionId(ctx), retention,
     { bypassGovernance: bypassGovernance(ctx) })
   sendEmpty(ctx, res, 200, versionId !== 'null' ? { 'x-amz-version-id': versionId } : {})

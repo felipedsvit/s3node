@@ -21,3 +21,5 @@
 | 13 | [Testing](testing.md) | Running tests, interop suite, coverage |
 | 14 | [Architecture](architecture.md) | Design decisions, how it works |
 | 15 | [Limits](limits.md) | Known limits, comparisons with MinIO and LocalStack |
+
+See the project [changelog](../CHANGELOG.md) for release notes and upgrade guidance.

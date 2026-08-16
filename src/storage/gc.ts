@@ -50,7 +50,10 @@ export class GarbageCollector {
    * Full collect: scan + remove orphans + clean empty directories.
    * Logs a summary line via console.error to stay out of stdout pipelines.
    */
-  async collect(): Promise<GCStats> {
+  async collect({ stalePendingBlobAgeMs = 0 }: { stalePendingBlobAgeMs?: number } = {}): Promise<GCStats> {
+    if (stalePendingBlobAgeMs > 0) {
+      this.store.metadata.releasePendingBlobsCreatedBefore(Date.now() - stalePendingBlobAgeMs)
+    }
     const referenced = this.store.metadata.allReferencedBlobIds()
     let scanned = 0
     let orphaned = 0

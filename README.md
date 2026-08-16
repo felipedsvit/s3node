@@ -1,4 +1,4 @@
-# [s3node](https://github.com/felipedsvit/s3node) &middot; [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![npm version](https://img.shields.io/npm/v/@felipedsvit/s3node.svg?style=flat)](https://www.npmjs.com/package/@felipedsvit/s3node) [![Node.js](https://img.shields.io/badge/node-%3E%3D22.5.0-brightgreen)](https://nodejs.org) [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/felipedsvit/s3node/pulls)
+# [s3node](https://github.com/felipedsvit/s3node) &middot; [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![npm version](https://img.shields.io/npm/v/@felipedsvit/s3node.svg?style=flat)](https://www.npmjs.com/package/@felipedsvit/s3node) [![Node.js](https://img.shields.io/badge/node-%3E%3D22.13.0-brightgreen)](https://nodejs.org) [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/felipedsvit/s3node/pulls)
 
 **s3node** is an embeddable, S3-compatible object storage server that runs inside your Node.js process. No containers, no binaries, no runtime dependencies.
 
@@ -7,11 +7,11 @@
 - **API-compatible:** Implements the S3 REST API — SigV4, presigned URLs, multipart uploads, lifecycle, notifications, Object Lock, CORS, bucket policies, and more.
 - **Node.js native:** Built on `node:http`, `node:sqlite`, and `node:crypto` — zero npm runtime dependencies.
 
-[Getting started](docs/getting-started.md) &middot; [Installation](docs/installation.md) &middot; [S3 API Reference](docs/s3-api.md) &middot; [Programmatic usage](docs/programmatic.md) &middot; [Architecture](docs/architecture.md) &middot; [Contributing](https://github.com/felipedsvit/s3node/pulls)
+[Getting started](docs/getting-started.md) &middot; [Installation](docs/installation.md) &middot; [S3 API Reference](docs/s3-api.md) &middot; [Programmatic usage](docs/programmatic.md) &middot; [Architecture](docs/architecture.md) &middot; [Changelog](CHANGELOG.md) &middot; [Contributing](https://github.com/felipedsvit/s3node/pulls)
 
 ## Installation
 
-s3node requires **Node.js >= 22.5.0** (>= 22.12.0 for cluster mode) and has **zero runtime dependencies**.
+s3node requires **Node.js >= 22.13.0** and has **zero runtime dependencies**. This minimum is the first Node 22 release where `node:sqlite` no longer requires an experimental flag.
 
 ```sh
 npm install @felipedsvit/s3node
@@ -59,6 +59,7 @@ const client = new S3Client({
 await client.send(new PutObjectCommand({ Bucket: 'b', Key: 'k', Body: 'hello' }))
 await s3node.close()
 ```
+
 ## CLI Reference
 
 | Flag | Env var | Default | Description |
@@ -72,10 +73,26 @@ await s3node.close()
 | `--virtual-host <domain>` | --- | off | Enable `bucket.domain` addressing |
 | `--cluster [count]` | --- | off | Workers: one per core or explicit count |
 | `--console-port <port>` | --- | off | Admin console HTTP port |
+| `--max-concurrent-writes <n>` | --- | `64` | Concurrent blob writes; `0` disables the limit |
+| `--rate-limit <rps>` | --- | `1000` | Sustained requests/second per caller |
+| `--rate-limit-burst <n>` | --- | `2000` | Per-caller burst capacity |
+| `--request-timeout-ms <ms>` | --- | `300000` | Maximum request duration |
+| `--socket-timeout-ms <ms>` | --- | `120000` | Idle socket timeout |
+| `--allow-private-notification-endpoints` | --- | false | Permit loopback/private webhook targets |
 | `--quiet` | --- | false | Suppress request error logging |
+| `--version` | --- | --- | Print the installed version |
 | `--help` | --- | --- | Show usage |
 
 `--access-key` and `--secret-key` must be given together.
+
+## Upgrading to v0.1.9
+
+- Node.js 22.13.0 or newer is required.
+- Metadata is migrated transactionally to schema v6 on first open. Back up `metadata.sqlite` and `master.key` together before upgrading; downgrading an opened data directory is not supported.
+- Private, loopback, and link-local notification endpoints are rejected by default. Enable them only on trusted networks with `allowPrivateNotificationEndpoints` or `--allow-private-notification-endpoints`.
+- The CLI now applies bounded write concurrency, rate limits, request timeouts, and graceful shutdown defaults. See [Configuration](docs/configuration.md) for overrides.
+
+See the [v0.1.9 changelog](CHANGELOG.md#019---2026-08-16) for the complete release summary.
 
 ## Examples
 
@@ -85,6 +102,7 @@ s3node --data-dir ./data --port 9000
 
 # With stable credentials
 s3node --data-dir ./data --access-key AKIDTEST --secret-key test-secret
+```
 
 ## Documentation
 
@@ -113,7 +131,7 @@ s3node --data-dir ./data --access-key AKIDTEST --secret-key test-secret
 ```js
 const s3node = await createServer({
   dataDir: './data',
-  sseS3Key: 'a'.repeat(64), // 256-bit key for SSE-S3
+  encryptionMasterKey: Buffer.alloc(32), // load this from a secret manager
   credentials: [{ accessKeyId: 'AKID', secretAccessKey: 'sk' }],
 })
 ```
@@ -128,10 +146,13 @@ await server.runLifecycle()
 ### Event notifications
 
 ```js
-const webhookConfig = {
-  queueArn: 'arn:webhook:http://example.com/hook',
-  events: ['s3:ObjectCreated:*'],
-}
+const xml = `<NotificationConfiguration>
+  <WebhookConfiguration>
+    <Id>created</Id>
+    <Endpoint>https://example.com/hook</Endpoint>
+    <Event>s3:ObjectCreated:*</Event>
+  </WebhookConfiguration>
+</NotificationConfiguration>`
 ```
 
 ## Contributing

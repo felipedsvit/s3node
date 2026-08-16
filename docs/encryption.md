@@ -37,6 +37,8 @@ The master key is:
 - Or auto-created at `<dataDir>/master.key` if the file does not exist
 - Or provided programmatically via `encryptionMasterKey` option (base64 string or Buffer)
 
+Creation is atomic across cluster workers. A malformed existing key is treated as a startup error and is never silently replaced. Back up `master.key` separately and restore it together with `metadata.sqlite`; losing it makes SSE-S3 objects unrecoverable.
+
 ### Per-object data key
 
 For each object, a random 256-bit data key is generated. The data key is wrapped (encrypted) with AES-256-GCM using the master key. The wrapped key, wrap IV, GCM auth tag, and data IV are stored in the object's metadata.
