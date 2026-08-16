@@ -54,5 +54,6 @@ All notable changes to s3node are documented here. The project follows semantic 
 - Expand coverage for CLI validation, log redaction, metadata migrations, concurrent metadata access, storage GC, notification delivery, policies, Object Lock, encryption, and cluster startup.
 - Refresh the README, security policy, architecture, CLI, configuration, storage, testing, and operational documentation.
 
+[0.1.10]: https://github.com/felipedsvit/s3node/releases/tag/v0.1.10
 [0.1.9]: https://github.com/felipedsvit/s3node/releases/tag/v0.1.9
 [previous releases]: https://github.com/felipedsvit/s3node/releases
