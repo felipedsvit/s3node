@@ -144,22 +144,22 @@ describe('objects', () => {
     )
   })
 
-  it('reclaims the superseded blob when a key is overwritten', async () => {
+  it('keeps a superseded blob readable for an already-resolved request', async () => {
     await store.putObject({ bucket: 'bkt', key: 'k', body: body('first') })
-    const firstBlob = store.getObject('bkt', 'k').blobId
+    const firstRecord = store.getObject('bkt', 'k')
     await store.putObject({ bucket: 'bkt', key: 'k', body: body('second') })
     const record = store.getObject('bkt', 'k')
-    assert.notEqual(record.blobId, firstBlob)
+    assert.notEqual(record.blobId, firstRecord.blobId)
     assert.equal((await readAll(store.createObjectStream(record))).toString(), 'second')
-    await assert.rejects(store.blobs.size(firstBlob))
+    assert.equal((await readAll(store.createObjectStream(firstRecord))).toString(), 'first')
   })
 
-  it('deletes idempotently and reclaims the blob', async () => {
+  it('deletes idempotently without breaking an already-resolved read', async () => {
     await store.putObject({ bucket: 'bkt', key: 'k', body: body('x') })
-    const blobId = store.getObject('bkt', 'k').blobId
+    const record = store.getObject('bkt', 'k')
     assert.equal((await store.deleteObject('bkt', 'k')).deleted, true)
     assert.equal((await store.deleteObject('bkt', 'k')).deleted, false)
-    await assert.rejects(store.blobs.size(blobId))
+    assert.equal((await readAll(store.createObjectStream(record))).toString(), 'x')
   })
 
   it('copies an object', async () => {

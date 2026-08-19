@@ -1,6 +1,6 @@
 import type { ServerResponse } from 'node:http'
 import { S3Error } from '../errors.js'
-import { collectBody, isoDate, sendEmpty, sendXml, type RequestContext } from '../http.js'
+import { collectRequestBody, isoDate, sendEmpty, sendXml, type RequestContext } from '../http.js'
 import { childText, childrenNamed, document, escapeXml, parseXml, text } from '../xml.js'
 import { MAX_DELETE_KEYS, integerParam, maybeEncode, ownerXml } from './shared.js'
 import { notify } from './shared.js'
@@ -9,7 +9,7 @@ import type { S3NodeServer } from '../server.js'
 import { objectArn } from '../features/policy.js'
 
 export async function createBucket(ctx: RequestContext, res: ServerResponse, { store }: { store: ObjectStore }): Promise<void> {
-  await collectBody(ctx.bodyStreams).catch(() => Buffer.alloc(0))
+  await collectRequestBody(ctx)
   store.createBucket(ctx.bucket)
   sendEmpty(ctx, res, 200, { Location: `/${ctx.bucket}` })
 }
@@ -151,7 +151,7 @@ export function listObjectVersions(ctx: RequestContext, res: ServerResponse, { s
 
 export async function deleteObjects(ctx: RequestContext, res: ServerResponse, { store, server }: { store: ObjectStore; server: S3NodeServer }): Promise<void> {
   store.requireBucket(ctx.bucket)
-  const body = await collectBody(ctx.bodyStreams)
+  const body = await collectRequestBody(ctx)
   const root = parseXml(body)
   if (root.name !== 'Delete') throw new S3Error('MalformedXML', 'Expected a Delete element')
 
@@ -179,11 +179,13 @@ export async function deleteObjects(ctx: RequestContext, res: ServerResponse, { 
       }
       const result = await store.deleteObject(ctx.bucket, key, versionId ?? null, { bypassGovernance })
       deleted.push({ key, ...result })
-      notify(server, {
-        bucket: ctx.bucket,
-        eventName: result.deleteMarker ? 'ObjectRemoved:DeleteMarkerCreated' : 'ObjectRemoved:Delete',
-        key, size: 0, versionId: result.versionId,
-      })
+      if (result.deleted) {
+        notify(server, {
+          bucket: ctx.bucket,
+          eventName: result.deleteMarker ? 'ObjectRemoved:DeleteMarkerCreated' : 'ObjectRemoved:Delete',
+          key, size: 0, versionId: result.versionId,
+        })
+      }
     } catch (err) {
       const s3 = err instanceof S3Error ? err : new S3Error('InternalError', (err as Error).message)
       errors.push({ key, code: s3.code, message: s3.message })

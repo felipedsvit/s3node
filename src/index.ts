@@ -38,8 +38,13 @@ import type { CreateOptions } from './server.js'
 
 export async function createServer(options: CreateOptions & { reusePort?: boolean } = {} as CreateOptions): Promise<S3NodeServer> {
   const server = await S3NodeServer.create(options)
-  const address = await server.listen(options.port ?? 0, options.host ?? '127.0.0.1',
-    { reusePort: options.reusePort ?? false })
-  server.endpoint = address!.endpoint
-  return server
+  try {
+    const address = await server.listen(options.port ?? 0, options.host ?? '127.0.0.1',
+      { reusePort: options.reusePort ?? false })
+    server.endpoint = address!.endpoint
+    return server
+  } catch (err) {
+    await server.close()
+    throw err
+  }
 }

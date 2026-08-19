@@ -32,7 +32,8 @@ export class MultipartMetadata {
       getUpload: db.prepare('SELECT * FROM uploads WHERE upload_id = ?'),
       deleteUpload: db.prepare('DELETE FROM uploads WHERE upload_id = ?'),
       listUploads: db.prepare(
-        'SELECT * FROM uploads WHERE bucket = ? ORDER BY key ASC, upload_id ASC LIMIT ?'),
+        'SELECT * FROM uploads WHERE bucket = ? AND (key > ? OR (? = 1 AND key = ? AND upload_id > ?)) ' +
+        'ORDER BY key ASC, upload_id ASC LIMIT ?'),
       countUploads: db.prepare('SELECT count(*) AS total FROM uploads WHERE bucket = ?'),
       staleUploads: db.prepare('SELECT * FROM uploads WHERE bucket = ? AND initiated_at < ?'),
       staleUploadsGlobal: db.prepare('SELECT * FROM uploads WHERE initiated_at < ?'),
@@ -97,8 +98,11 @@ export class MultipartMetadata {
     return this._decodeUpload(this.statements.getUpload.get(uploadId) as unknown as UploadRow | undefined)
   }
 
-  listUploads(bucket: string, maxUploads = 1000): UploadRecord[] {
-    return (this.statements.listUploads.all(bucket, maxUploads) as unknown as UploadRow[])
+  listUploads(bucket: string, maxUploads = 1000, keyMarker = '', uploadIdMarker: string | null = null): UploadRecord[] {
+    const marker = toKeyBuffer(keyMarker)
+    return (this.statements.listUploads.all(
+      bucket, marker, uploadIdMarker === null ? 0 : 1, marker, uploadIdMarker ?? '', maxUploads,
+    ) as unknown as UploadRow[])
       .map((row) => this._decodeUpload(row))
       .filter((u): u is UploadRecord => u !== null)
   }

@@ -47,6 +47,17 @@ describe('CORS', () => {
     assert.equal(tag(stored.text, 'MaxAgeSeconds'), '3000')
   })
 
+  it('rejects a MaxAgeSeconds value containing trailing junk', async () => {
+    const response = await client.request({
+      method: 'PUT', bucket: BUCKET, query: { cors: '' },
+      body: '<CORSConfiguration><CORSRule><AllowedOrigin>*</AllowedOrigin>' +
+        '<AllowedMethod>GET</AllowedMethod><MaxAgeSeconds>30seconds</MaxAgeSeconds>' +
+        '</CORSRule></CORSConfiguration>',
+    })
+    assert.equal(response.status, 400)
+    assert.equal(tag(response.text, 'Code'), 'MalformedXML')
+  })
+
   it('answers a preflight without authentication', async () => {
     await setCors()
     // Browsers never attach credentials to a preflight, so it must work unsigned.
@@ -256,6 +267,14 @@ describe('lifecycle', () => {
     assert.equal(tag(response.text, 'Code'), 'MalformedXML')
   })
 
+  it('rejects lifecycle day counts containing trailing junk', async () => {
+    const response = await setLifecycle(
+      '<LifecycleConfiguration><Rule><ID>x</ID><Status>Enabled</Status>' +
+      '<Expiration><Days>30days</Days></Expiration></Rule></LifecycleConfiguration>')
+    assert.equal(response.status, 400)
+    assert.equal(tag(response.text, 'Code'), 'MalformedXML')
+  })
+
   it('expires only objects matching the rule prefix and age', async () => {
     await setLifecycle()
     await client.request({ method: 'PUT', bucket: BUCKET, key: 'logs/old.txt', body: 'old' })
@@ -399,6 +418,18 @@ describe('event notifications', () => {
     assert.equal(created.Records[0].s3.object.key, 'watched.txt')
     assert.equal(created.Records[0].s3.object.size, 5)
     assert.equal(removed.Records[0].eventName, 'ObjectRemoved:Delete')
+  })
+
+  it('does not emit a bulk-delete event for a key that did not exist', async () => {
+    received.length = 0
+    await configure(['s3:ObjectRemoved:*'])
+    const response = await client.request({
+      method: 'POST', bucket: BUCKET, query: { delete: '' },
+      body: '<Delete><Object><Key>missing.txt</Key></Object></Delete>',
+    })
+    assert.equal(response.status, 200)
+    await harness.server.notifications.drain()
+    assert.equal(received.length, 0)
   })
 
   it('honours prefix and suffix filters', async () => {

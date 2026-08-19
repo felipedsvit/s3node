@@ -113,6 +113,21 @@ describe('policy engine', () => {
     assert.equal(evaluatePolicy(policy, target({ context: { principal: '*' } })), 'NoDecision')
   })
 
+  it('matches every principal except the one named by NotPrincipal', () => {
+    const policy = parsePolicy(JSON.stringify({
+      Statement: [{
+        Effect: 'Allow', NotPrincipal: { AWS: 'arn:aws:iam::s3node:user/AKIDBLOCKED' },
+        Action: 's3:GetObject', Resource: '*',
+      }],
+    }))
+    assert.equal(evaluatePolicy(policy, target({
+      context: { principal: 'arn:aws:iam::s3node:user/AKIDALLOWED' },
+    })), 'Allow')
+    assert.equal(evaluatePolicy(policy, target({
+      context: { principal: 'arn:aws:iam::s3node:user/AKIDBLOCKED' },
+    })), 'NoDecision')
+  })
+
   it('evaluates StringEquals and StringLike conditions', () => {
     const policy = parsePolicy(JSON.stringify({
       Statement: [{
@@ -173,10 +188,24 @@ describe('policy engine', () => {
   it('rejects malformed policies', () => {
     assert.throws(() => parsePolicy('not json'), (err) => err.code === 'MalformedPolicy')
     assert.throws(() => parsePolicy('{}'), (err) => err.code === 'MalformedPolicy')
+    assert.throws(() => parsePolicy('{"Statement":[]}'), (err) => err.code === 'MalformedPolicy')
     assert.throws(() => parsePolicy(JSON.stringify({ Statement: [{ Effect: 'Maybe' }] })),
       (err) => err.code === 'MalformedPolicy')
     assert.throws(() => parsePolicy(JSON.stringify({ Statement: [{ Effect: 'Allow' }] })),
       (err) => err.code === 'MalformedPolicy')
+    for (const statement of [
+      null,
+      { Effect: 'Allow', Action: 's3:*', Resource: '*' },
+      { Effect: 'Allow', Principal: '*', Action: 's3:*' },
+      { Effect: 'Allow', Principal: '*', Action: 's3:*', NotAction: 's3:GetObject', Resource: '*' },
+      { Effect: 'Allow', Principal: '*', Action: 's3:*', Resource: '*', NotResource: 'arn:aws:s3:::x' },
+      { Effect: 'Allow', Principal: '*', NotPrincipal: '*', Action: 's3:*', Resource: '*' },
+      { Effect: 'Allow', Principal: '*', Action: 's3:*', Resource: '*', Condition: { StringEquals: 'x' } },
+      { Effect: 'Allow', Principal: '*', Action: 's3:*', Resource: '*', Condition: { StringEquals: { key: [] } } },
+    ]) {
+      assert.throws(() => parsePolicy(JSON.stringify({ Statement: [statement] })),
+        (err) => err.code === 'MalformedPolicy')
+    }
   })
 
   it('rejects an unsupported condition operator at write time', () => {

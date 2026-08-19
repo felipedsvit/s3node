@@ -97,7 +97,16 @@ function resolveOperator(rawOperator: string): ResolvedOperator {
  */
 function assertKnownOperators(condition: ConditionBlock | undefined | null): void {
   if (!condition) return
-  for (const rawOperator of Object.keys(condition)) resolveOperator(rawOperator)
+  for (const [rawOperator, tests] of Object.entries(condition)) {
+    resolveOperator(rawOperator)
+    if (!tests || typeof tests !== 'object' || Array.isArray(tests)) {
+      throw new S3Error('MalformedPolicy', `${rawOperator} must contain condition keys`)
+    }
+    for (const [key, expected] of Object.entries(tests)) {
+      if (!key) throw new S3Error('MalformedPolicy', 'Condition keys must not be empty')
+      assertStringSet(expected, `${rawOperator}.${key}`)
+    }
+  }
 }
 
 function evaluateConditions(condition: ConditionBlock | undefined | null, context: Record<string, string | undefined | null>): boolean {
@@ -115,8 +124,10 @@ function evaluateConditions(condition: ConditionBlock | undefined | null, contex
   return true
 }
 
-function principalMatches(principal: string | { AWS?: string | string[] } | undefined, context: Record<string, string | undefined | null>): boolean {
-  if (principal === undefined) return true
+type Principal = string | { AWS?: string | string[] }
+
+function principalMatches(principal: Principal | undefined, context: Record<string, string | undefined | null>): boolean {
+  if (principal === undefined) return false
   if (principal === '*') return true
   if (typeof principal === 'string') return matchesWildcard(principal, context['principal'])
   const aws = toArray(principal.AWS)
@@ -133,6 +144,34 @@ export interface PolicyStatement {
   Principal?: string | { AWS?: string | string[] }
   NotPrincipal?: string | { AWS?: string | string[] }
   Condition?: ConditionBlock
+}
+
+function assertStringSet(value: unknown, field: string): void {
+  const values = Array.isArray(value) ? value : [value]
+  if (values.length === 0 || values.some((entry) => typeof entry !== 'string' || entry.length === 0)) {
+    throw new S3Error('MalformedPolicy', `${field} must be a string or a non-empty array of strings`)
+  }
+}
+
+function assertExclusivePair(statement: Record<string, unknown>, field: string, inverse: string): void {
+  const hasField = statement[field] !== undefined
+  const hasInverse = statement[inverse] !== undefined
+  if (hasField === hasInverse) {
+    throw new S3Error('MalformedPolicy', `Each statement requires exactly one of ${field} or ${inverse}`)
+  }
+  assertStringSet(statement[hasField ? field : inverse], hasField ? field : inverse)
+}
+
+function assertPrincipal(value: unknown, field: string): void {
+  if (typeof value === 'string' && value.length > 0) return
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new S3Error('MalformedPolicy', `${field} must be a string or an AWS principal object`)
+  }
+  const entries = Object.entries(value as Record<string, unknown>)
+  if (entries.length !== 1 || entries[0]![0] !== 'AWS') {
+    throw new S3Error('MalformedPolicy', `${field} only supports the AWS principal type`)
+  }
+  assertStringSet(entries[0]![1], `${field}.AWS`)
 }
 
 export interface PolicyDocument {
@@ -154,8 +193,8 @@ function statementMatchesTarget(statement: PolicyStatement, { action, resource, 
   if (resources.length && !resources.some((pattern) => matchesWildcard(pattern, resource))) return false
   if (notResources.length && notResources.some((pattern) => matchesWildcard(pattern, resource))) return false
 
-  if (!principalMatches(statement.Principal, context)) return false
-  if (statement.NotPrincipal && principalMatches(statement.NotPrincipal, context)) return false
+  if (statement.Principal !== undefined && !principalMatches(statement.Principal, context)) return false
+  if (statement.NotPrincipal !== undefined && principalMatches(statement.NotPrincipal, context)) return false
 
   return evaluateConditions(statement.Condition, context)
 }
@@ -171,15 +210,29 @@ export function parsePolicy(body: string | Buffer): PolicyDocument {
   } catch {
     throw new S3Error('MalformedPolicy', 'The policy is not valid JSON')
   }
-  if (!policy || typeof policy !== 'object' || !Array.isArray(policy.Statement)) {
+  if (!policy || typeof policy !== 'object' || !Array.isArray(policy.Statement) || policy.Statement.length === 0) {
     throw new S3Error('MalformedPolicy', 'A policy requires a Statement array')
   }
-  for (const statement of policy.Statement) {
+  for (const candidate of policy.Statement) {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+      throw new S3Error('MalformedPolicy', 'Each statement must be an object')
+    }
+    const statement = candidate as Record<string, unknown> & PolicyStatement
     if (statement.Effect !== 'Allow' && statement.Effect !== 'Deny') {
       throw new S3Error('MalformedPolicy', 'Each statement requires an Effect of Allow or Deny')
     }
-    if (!statement.Action && !statement.NotAction) {
-      throw new S3Error('MalformedPolicy', 'Each statement requires an Action')
+    assertExclusivePair(statement, 'Action', 'NotAction')
+    assertExclusivePair(statement, 'Resource', 'NotResource')
+    const hasPrincipal = statement.Principal !== undefined
+    const hasNotPrincipal = statement.NotPrincipal !== undefined
+    if (hasPrincipal === hasNotPrincipal) {
+      throw new S3Error('MalformedPolicy', 'Each statement requires exactly one of Principal or NotPrincipal')
+    }
+    assertPrincipal(hasPrincipal ? statement.Principal : statement.NotPrincipal,
+      hasPrincipal ? 'Principal' : 'NotPrincipal')
+    if (statement.Condition !== undefined &&
+        (!statement.Condition || typeof statement.Condition !== 'object' || Array.isArray(statement.Condition))) {
+      throw new S3Error('MalformedPolicy', 'Condition must be an object')
     }
     assertKnownOperators(statement.Condition)
   }

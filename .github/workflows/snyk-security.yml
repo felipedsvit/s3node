@@ -34,6 +34,10 @@ jobs:
       security-events: write # for github/codeql-action/upload-sarif to upload SARIF results
       actions: read # only required for a private repository by github/codeql-action/upload-sarif to get the Action run status
     runs-on: ubuntu-latest
+    env:
+      # The CLI consumes this directly in CI; `snyk auth` defaults to an
+      # interactive OAuth flow and must not be used by the workflow.
+      SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - name: Set up Snyk CLI to check for security issues
@@ -47,20 +51,19 @@ jobs:
         #  with:
         #    node-version: 20
 
-        env:
-          # This is where you will need to introduce the Snyk API token created with your Snyk account
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-
         # Runs Snyk Code (SAST) analysis and uploads result into GitHub.
         # Use || true to not fail the pipeline
-      - name: Authenticate Snyk
-        run: snyk auth ${{ secrets.SNYK_TOKEN }}
+      - name: Report missing Snyk token
+        if: env.SNYK_TOKEN == ''
+        run: echo "::warning::SNYK_TOKEN is unavailable; security scans were skipped."
       - name: Snyk Code test
+        if: env.SNYK_TOKEN != ''
         continue-on-error: true
-        run: snyk code test --sarif > snyk-code.sarif
+        run: snyk code test --sarif-file-output=snyk-code.sarif
 
         # Runs Snyk Open Source (SCA) analysis and uploads result to Snyk.
       - name: Snyk Open Source monitor
+        if: env.SNYK_TOKEN != '' && github.event_name == 'push'
         run: snyk monitor --all-projects
 
         # No IaC config, Dockerfile or container image in this repo (a plain
@@ -69,6 +72,7 @@ jobs:
 
         # Push the Snyk Code results into GitHub Code Scanning tab
       - name: Upload result to GitHub Code Scanning
+        if: always() && hashFiles('snyk-code.sarif') != ''
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: snyk-code.sarif

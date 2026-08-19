@@ -10,10 +10,17 @@ let base
 const auth = (cred = CREDENTIAL) =>
   'Basic ' + Buffer.from(`${cred.accessKeyId}:${cred.secretAccessKey}`).toString('base64')
 
-async function call(path, { method = 'GET', body, credential = CREDENTIAL, headers = {} } = {}) {
+async function call(path, {
+  method = 'GET', body, credential = CREDENTIAL, headers = {}, csrf = true,
+} = {}) {
+  const mutating = method !== 'GET' && method !== 'HEAD'
   const response = await fetch(`${base}${path}`, {
     method,
-    headers: { ...(credential ? { authorization: auth(credential) } : {}), ...headers },
+    headers: {
+      ...(credential ? { authorization: auth(credential) } : {}),
+      ...(mutating && csrf ? { 'x-s3node-csrf': '1' } : {}),
+      ...headers,
+    },
     body,
   })
   const text = await response.text()
@@ -86,6 +93,16 @@ describe('console UI', () => {
 })
 
 describe('console API', () => {
+  it('rejects state-changing requests without the CSRF header or from another origin', async () => {
+    assert.equal((await call('/api/bucket?name=console-bucket', {
+      method: 'POST', csrf: false,
+    })).status, 403)
+    assert.equal((await call('/api/bucket?name=console-bucket', {
+      method: 'POST', headers: { origin: 'https://attacker.example' },
+    })).status, 403)
+    assert.deepEqual((await call('/api/buckets')).json.buckets, [])
+  })
+
   it('creates, lists and deletes a bucket', async () => {
     assert.equal((await call('/api/bucket?name=console-bucket', { method: 'POST' })).status, 201)
 
@@ -133,6 +150,19 @@ describe('console API', () => {
     assert.equal(info.buckets, 1)
     assert.equal(info.objects, 1)
     assert.equal(info.bytes, 5)
+  })
+
+  it('counts every object in server info, beyond the console listing limit', async () => {
+    harness.server.store.createBucket('summary-bucket')
+    for (let index = 0; index < 1001; index++) {
+      harness.server.store.metadata.putObject({
+        bucket: 'summary-bucket', key: `key-${String(index).padStart(4, '0')}`,
+        size: 2, etag: 'test', lastModified: Date.now(), isLatest: true,
+      })
+    }
+    const info = (await call('/api/info')).json
+    assert.equal(info.objects, 1001)
+    assert.equal(info.bytes, 2002)
   })
 
   it('surfaces store errors with their status', async () => {

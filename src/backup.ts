@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import {
-  chmod, copyFile, lstat, mkdir, open, readFile, rename, rm, stat, writeFile,
+  chmod, copyFile, lstat, mkdir, open, readFile, realpath, rename, rm, stat, writeFile,
 } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import * as sqlite from 'node:sqlite'
@@ -72,6 +72,19 @@ function safeManifestPath(root: string, name: string): string {
   return path
 }
 
+async function safeExistingManifestFile(root: string, name: string): Promise<{ path: string; size: number }> {
+  const path = safeManifestPath(root, name)
+  const linkInfo = await lstat(path)
+  if (linkInfo.isSymbolicLink()) throw new Error(`backup file must not be a symbolic link: ${name}`)
+  const actual = await realpath(path)
+  if (actual !== root && !actual.startsWith(`${root}${sep}`)) {
+    throw new Error(`backup file resolves outside the backup root: ${name}`)
+  }
+  const info = await stat(actual)
+  if (!info.isFile()) throw new Error(`backup entry is not a regular file: ${name}`)
+  return { path: actual, size: info.size }
+}
+
 type DatabaseSync = InstanceType<typeof sqlite.DatabaseSync>
 
 function readBlobIds(db: DatabaseSync): string[] {
@@ -119,7 +132,7 @@ function assertSeparateTrees(source: string, destination: string): void {
  * standalone metadata.sqlite snapshot, so WAL/SHM companions are not restored.
  */
 export async function createBackup(sourceDirectory: string, destinationDirectory: string): Promise<BackupManifest> {
-  const source = resolve(sourceDirectory)
+  const source = await realpath(resolve(sourceDirectory))
   const destination = resolve(destinationDirectory)
   assertSeparateTrees(source, destination)
   if (await pathExists(destination)) throw new Error(`backup destination already exists: ${destination}`)
@@ -127,11 +140,13 @@ export async function createBackup(sourceDirectory: string, destinationDirectory
   if (!await pathExists(join(source, 'master.key'))) {
     throw new Error('source master.key does not exist; externally managed keys must be backed up by their key manager')
   }
+  const databaseFile = await safeExistingManifestFile(source, 'metadata.sqlite')
+  const masterKeyFile = await safeExistingManifestFile(source, 'master.key')
 
   const staging = `${destination}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`
   await mkdir(dirname(destination), { recursive: true, mode: 0o700 })
   await mkdir(staging, { recursive: false, mode: 0o700 })
-  const databasePath = join(source, 'metadata.sqlite')
+  const databasePath = databaseFile.path
   const lockDb = new sqlite.DatabaseSync(databasePath, { timeout: 30_000 })
   const snapshotDb = new sqlite.DatabaseSync(databasePath, { readOnly: true, timeout: 30_000 })
   let inTransaction = false
@@ -163,11 +178,12 @@ export async function createBackup(sourceDirectory: string, destinationDirectory
     await chmod(metadataPath, 0o600)
     await syncFile(metadataPath)
     files['metadata.sqlite'] = { size: (await stat(metadataPath)).size, sha256: await sha256File(metadataPath) }
-    files['master.key'] = await copyDurable(join(source, 'master.key'), join(staging, 'master.key'))
+    files['master.key'] = await copyDurable(masterKeyFile.path, join(staging, 'master.key'))
 
     for (const blobId of blobIds) {
       const name = blobRelativePath(blobId)
-      files[name] = await copyDurable(join(source, name), join(staging, name))
+      const blobFile = await safeExistingManifestFile(source, name)
+      files[name] = await copyDurable(blobFile.path, join(staging, name))
     }
 
     const manifest: BackupManifest = {
@@ -201,8 +217,9 @@ export async function createBackup(sourceDirectory: string, destinationDirectory
 }
 
 export async function verifyBackup(backupDirectory: string): Promise<BackupManifest> {
-  const root = resolve(backupDirectory)
-  const manifest = JSON.parse(await readFile(join(root, MANIFEST_NAME), 'utf8')) as BackupManifest
+  const root = await realpath(resolve(backupDirectory))
+  const manifestFile = await safeExistingManifestFile(root, MANIFEST_NAME)
+  const manifest = JSON.parse(await readFile(manifestFile.path, 'utf8')) as BackupManifest
   if (manifest.format !== 1 || !manifest.files || typeof manifest.files !== 'object') {
     throw new Error('unsupported or malformed backup manifest')
   }
@@ -211,10 +228,9 @@ export async function verifyBackup(backupDirectory: string): Promise<BackupManif
   }
 
   for (const [name, expected] of Object.entries(manifest.files)) {
-    const path = safeManifestPath(root, name)
-    const info = await stat(path)
-    if (!info.isFile() || info.size !== expected.size) throw new Error(`backup size mismatch: ${name}`)
-    const digest = await sha256File(path)
+    const file = await safeExistingManifestFile(root, name)
+    if (file.size !== expected.size) throw new Error(`backup size mismatch: ${name}`)
+    const digest = await sha256File(file.path)
     if (digest !== expected.sha256) throw new Error(`backup checksum mismatch: ${name}`)
   }
 
@@ -235,7 +251,7 @@ export async function verifyBackup(backupDirectory: string): Promise<BackupManif
 }
 
 export async function restoreBackup(backupDirectory: string, destinationDirectory: string): Promise<BackupManifest> {
-  const source = resolve(backupDirectory)
+  const source = await realpath(resolve(backupDirectory))
   const destination = resolve(destinationDirectory)
   assertSeparateTrees(source, destination)
   if (await pathExists(destination)) throw new Error(`restore destination already exists: ${destination}`)
@@ -245,9 +261,11 @@ export async function restoreBackup(backupDirectory: string, destinationDirector
   await mkdir(staging, { recursive: false, mode: 0o700 })
   try {
     for (const name of Object.keys(manifest.files)) {
-      await copyDurable(safeManifestPath(source, name), safeManifestPath(staging, name))
+      const file = await safeExistingManifestFile(source, name)
+      await copyDurable(file.path, safeManifestPath(staging, name))
     }
-    await copyDurable(join(source, MANIFEST_NAME), join(staging, MANIFEST_NAME))
+    const manifestFile = await safeExistingManifestFile(source, MANIFEST_NAME)
+    await copyDurable(manifestFile.path, join(staging, MANIFEST_NAME))
     await syncDirectory(staging)
     await rename(staging, destination)
     await syncDirectory(dirname(destination))

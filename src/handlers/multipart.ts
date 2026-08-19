@@ -2,7 +2,7 @@ import type { ServerResponse } from 'node:http'
 import { S3Error } from '../errors.js'
 import { encryptionResponseHeaders } from '../features/encryption.js'
 import { parseTaggingHeader } from '../features/tagging.js'
-import { collectBody, isoDate, sendEmpty, sendXml, userMetadata, type RequestContext } from '../http.js'
+import { collectRequestBody, isoDate, sendEmpty, sendXml, userMetadata, type RequestContext } from '../http.js'
 import { childText, childrenNamed, document, parseXml, text } from '../xml.js'
 import {
   checksumHeaders, integerParam, integrityOptions, notify, ownerXml, parseCopySource, sseRequest,
@@ -29,7 +29,7 @@ export function createMultipartUpload(ctx: RequestContext, res: ServerResponse, 
 }
 
 export async function uploadPart(ctx: RequestContext, res: ServerResponse, { store }: { store: ObjectStore }): Promise<void> {
-  const partNumber = Number.parseInt(ctx.query.get('partNumber')!, 10)
+  const partNumber = Number(ctx.query.get('partNumber'))
   const result = await store.uploadPart({
     bucket: ctx.bucket,
     key: ctx.key,
@@ -53,7 +53,12 @@ function parseCopySourceRange(header: string | string[] | undefined): { start: n
   if (!match) {
     throw new S3Error('InvalidArgument', 'x-amz-copy-source-range must be of the form bytes=first-last')
   }
-  return { start: Number.parseInt(match[1]!, 10), end: Number.parseInt(match[2]!, 10) }
+  const start = Number(match[1])
+  const end = Number(match[2])
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end)) {
+    throw new S3Error('InvalidArgument', 'x-amz-copy-source-range bounds are too large')
+  }
+  return { start, end }
 }
 
 export async function uploadPartCopy(ctx: RequestContext, res: ServerResponse, { store, server }: { store: ObjectStore; server: S3NodeServer }): Promise<void> {
@@ -63,7 +68,7 @@ export async function uploadPartCopy(ctx: RequestContext, res: ServerResponse, {
     bucket: ctx.bucket,
     key: ctx.key,
     uploadId: ctx.query.get('uploadId')!,
-    partNumber: Number.parseInt(ctx.query.get('partNumber')!, 10),
+    partNumber: Number(ctx.query.get('partNumber')),
     sourceBucket: source.bucket,
     sourceKey: source.key,
     sourceVersionId: source.versionId,
@@ -82,13 +87,14 @@ export async function uploadPartCopy(ctx: RequestContext, res: ServerResponse, {
 
 export async function completeMultipartUpload(ctx: RequestContext, res: ServerResponse, { store, server }: { store: ObjectStore; server: S3NodeServer }): Promise<void> {
   const uploadId = ctx.query.get('uploadId')!
-  const root = parseXml(await collectBody(ctx.bodyStreams))
+  const root = parseXml(await collectRequestBody(ctx))
   if (root.name !== 'CompleteMultipartUpload') {
     throw new S3Error('MalformedXML', 'Expected a CompleteMultipartUpload element')
   }
 
   const requestedParts = childrenNamed(root, 'Part').map((part) => {
-    const partNumber = Number.parseInt(childText(part, 'PartNumber') ?? '', 10)
+    const rawPartNumber = childText(part, 'PartNumber') ?? ''
+    const partNumber = /^\d+$/.test(rawPartNumber) ? Number(rawPartNumber) : Number.NaN
     const etag = childText(part, 'ETag')
     if (!Number.isInteger(partNumber) || !etag) {
       throw new S3Error('MalformedXML', 'Each Part requires PartNumber and ETag')
@@ -121,10 +127,14 @@ export async function abortMultipartUpload(ctx: RequestContext, res: ServerRespo
 
 export function listParts(ctx: RequestContext, res: ServerResponse, { store }: { store: ObjectStore }): void {
   const uploadId = ctx.query.get('uploadId')!
+  store.requireUpload(uploadId, ctx.bucket, ctx.key)
   const partNumberMarker = integerParam(ctx.query, 'part-number-marker', 0)
   const maxParts = integerParam(ctx.query, 'max-parts', 1000, { min: 0, max: 1000 })
-  const parts = store.listParts(ctx.bucket, ctx.key, uploadId, { partNumberMarker, maxParts })
-  const truncated = parts.length === maxParts
+  const fetched = maxParts === 0 ? [] : store.listParts(ctx.bucket, ctx.key, uploadId, {
+    partNumberMarker, maxParts: maxParts + 1,
+  })
+  const truncated = fetched.length > maxParts
+  const parts = truncated ? fetched.slice(0, maxParts) : fetched
 
   const nextMarker = truncated ? parts[parts.length - 1].partNumber : undefined
   const body =
@@ -142,9 +152,15 @@ export function listParts(ctx: RequestContext, res: ServerResponse, { store }: {
 }
 
 export function listMultipartUploads(ctx: RequestContext, res: ServerResponse, { store }: { store: ObjectStore }): void {
+  store.requireBucket(ctx.bucket)
   const maxUploads = integerParam(ctx.query, 'max-uploads', 1000, { min: 0, max: 1000 })
-  const uploads = store.listMultipartUploads(ctx.bucket, maxUploads)
-  const truncated = uploads.length === maxUploads
+  const keyMarker = ctx.query.get('key-marker') ?? ''
+  const uploadIdMarker = ctx.query.get('upload-id-marker') ?? null
+  const fetched = maxUploads === 0
+    ? []
+    : store.listMultipartUploads(ctx.bucket, maxUploads + 1, keyMarker, uploadIdMarker)
+  const truncated = fetched.length > maxUploads
+  const uploads = truncated ? fetched.slice(0, maxUploads) : fetched
   const last = truncated ? uploads[uploads.length - 1] : null
   const body =
     text('Bucket', ctx.bucket) + text('MaxUploads', maxUploads) +

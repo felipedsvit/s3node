@@ -20,6 +20,7 @@ export class ChunkedDecoder extends Transform {
   scope: string | null
   amzDate: string | null
   expectedLength: number | null
+  requireTrailerSignature: boolean
   trailers: Record<string, string>
   decodedLength: number
 
@@ -38,6 +39,7 @@ export class ChunkedDecoder extends Transform {
     scope = null,
     amzDate = null,
     expectedLength = null,
+    requireTrailerSignature = false,
   }: {
     signed?: boolean
     seedSignature?: string | null
@@ -45,6 +47,7 @@ export class ChunkedDecoder extends Transform {
     scope?: string | null
     amzDate?: string | null
     expectedLength?: number | null
+    requireTrailerSignature?: boolean
   } = {}, options = {}) {
     super(options)
     this.signed = signed
@@ -53,6 +56,7 @@ export class ChunkedDecoder extends Transform {
     this.scope = scope
     this.amzDate = amzDate
     this.expectedLength = expectedLength
+    this.requireTrailerSignature = requireTrailerSignature
 
     this.trailers = Object.create(null) as Record<string, string>
     this.decodedLength = 0
@@ -120,8 +124,9 @@ export class ChunkedDecoder extends Transform {
         const line = this._takeLine()
         if (line === null) return
         const [sizeField, ...extensions] = line.split(';')
-        const size = Number.parseInt(sizeField!.trim(), 16)
-        if (!Number.isInteger(size) || size < 0 || size > MAX_CHUNK_BYTES) {
+        const rawSize = sizeField!.trim()
+        const size = /^[0-9a-f]+$/i.test(rawSize) ? Number.parseInt(rawSize, 16) : Number.NaN
+        if (!Number.isSafeInteger(size) || size < 0 || size > MAX_CHUNK_BYTES) {
           throw new S3Error('InvalidRequest', `Malformed aws-chunked framing: bad chunk size "${sizeField}"`)
         }
         this._chunkSignature = null
@@ -216,7 +221,13 @@ export class ChunkedDecoder extends Transform {
   }
 
   _verifyTrailerSignature(): void {
-    if (!this.signed || !this._trailerSignature) return
+    if (!this.signed) return
+    if (!this._trailerSignature) {
+      if (this.requireTrailerSignature) {
+        throw new S3Error('SignatureDoesNotMatch', 'Signed trailing headers require x-amz-trailer-signature')
+      }
+      return
+    }
     const stringToSign = trailerStringToSign({
       amzDate: this.amzDate,
       scope: this.scope,

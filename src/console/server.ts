@@ -31,6 +31,7 @@ export interface ConsoleOptions {
 }
 
 const MAX_LIST_KEYS = 1000
+const CSRF_HEADER = 'x-s3node-csrf'
 
 function unauthorized(res: ServerResponse): void {
   res.writeHead(401, {
@@ -120,6 +121,17 @@ export class ConsoleServer {
       }
       unauthorized(res)
       return
+    }
+
+    if (!['GET', 'HEAD'].includes(req.method ?? '')) {
+      const origin = req.headers.origin
+      let originMatchesHost = origin === undefined
+      try { originMatchesHost = originMatchesHost || new URL(origin!).host === req.headers.host } catch { /* reject */ }
+      const fetchSite = req.headers['sec-fetch-site']
+      if (req.headers[CSRF_HEADER] !== '1' ||
+          !originMatchesHost || fetchSite === 'cross-site') {
+        throw new S3Error('AccessDenied', 'Cross-site console request rejected')
+      }
     }
 
     const params = url.searchParams
@@ -230,9 +242,9 @@ export class ConsoleServer {
     let objects = 0
     let bytes = 0
     for (const bucket of buckets) {
-      const listing = this.options.store.listObjects(bucket.name, { maxKeys: MAX_LIST_KEYS })
-      objects += listing.contents.length
-      for (const record of listing.contents) bytes += record.size
+      const usage = this.options.store.metadata.bucketUsage(bucket.name)
+      objects += usage.objects
+      bytes += usage.bytes
     }
     return { region: this.options.region, version: this.options.version, buckets: buckets.length, objects, bytes }
   }

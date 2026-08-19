@@ -89,6 +89,9 @@ export class ObjectService {
       if (input.checksumAlgorithm) {
         const computed = hasher.digest(input.checksumAlgorithm, 'base64')
         const declared = input.expectedChecksum ?? input.trailerProvider?.(`x-amz-checksum-${input.checksumAlgorithm}`) ?? null
+        if (input.trailerProvider && !declared) {
+          throw new S3Error('InvalidRequest', `Missing x-amz-checksum-${input.checksumAlgorithm} trailer`)
+        }
         if (declared && declared !== computed) {
           throw checksumMismatch(input.checksumAlgorithm, declared, computed)
         }
@@ -406,6 +409,6 @@ export class ObjectService {
     const ids: string[] = []
     if (record.blobId) ids.push(record.blobId)
     if (record.parts) for (const part of record.parts) ids.push(part.blobId)
-    await this.ctx.blobs.removeMany(ids)
+    await this.ctx.blobs.retireMany(ids)
   }
 }

@@ -55,8 +55,8 @@ export function parseObjectLockConfigXml(body: string | Buffer): ObjectLockConfi
     throw new S3Error('MalformedXML', 'DefaultRetention accepts either Days or Years, not both')
   }
   const period = days ?? years
-  const amount = Number.parseInt(period ?? '', 10)
-  if (!Number.isInteger(amount) || amount <= 0) {
+  const amount = /^\d+$/.test(period ?? '') ? Number(period) : Number.NaN
+  if (!Number.isSafeInteger(amount) || amount <= 0) {
     throw new S3Error('MalformedXML', 'DefaultRetention requires a positive Days or Years')
   }
 

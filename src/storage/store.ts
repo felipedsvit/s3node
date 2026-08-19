@@ -199,8 +199,8 @@ export class ObjectStore {
   listParts(bucket: string, key: string, uploadId: string, options: ListPartsOptions): PartRecord[] {
     return this.multipart.listParts(bucket, key, uploadId, options)
   }
-  listMultipartUploads(bucket: string, maxUploads: number): UploadRecord[] {
-    return this.multipart.listMultipartUploads(bucket, maxUploads)
+  listMultipartUploads(bucket: string, maxUploads: number, keyMarker = '', uploadIdMarker: string | null = null): UploadRecord[] {
+    return this.multipart.listMultipartUploads(bucket, maxUploads, keyMarker, uploadIdMarker)
   }
   completeMultipartUpload(input: CompleteMultipartInput): Promise<PutObjectResult> {
     return this.multipart.completeMultipartUpload(input)

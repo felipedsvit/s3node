@@ -44,6 +44,17 @@ describe('GarbageCollector', () => {
     await assert.rejects(store.blobs.size(blobId))
   })
 
+  it('does not collect a freshly retired blob needed by an in-flight read', async () => {
+    await store.putObject({ bucket: 'bkt', key: 'retired', body: body('still readable') })
+    const record = store.getObject('bkt', 'retired')
+    await store.deleteObject('bkt', 'retired')
+
+    const stats = await gc.collect()
+    assert.equal(stats.orphaned, 1)
+    assert.equal(stats.deleted, 0)
+    await assert.doesNotReject(store.blobs.size(record.blobId))
+  })
+
   it('removes empty directories after deleting orphans', async () => {
     const { blobId } = await store.blobs.write(Readable.from([Buffer.from('dir-cleanup')]), { algorithms: ['md5'] })
     const xx = blobId.slice(0, 2)

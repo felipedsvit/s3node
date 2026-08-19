@@ -226,8 +226,8 @@ export class MetadataStore {
     return this.multipart.getUpload(uploadId)
   }
 
-  listUploads(bucket: string, maxUploads = 1000): UploadRecord[] {
-    return this.multipart.listUploads(bucket, maxUploads)
+  listUploads(bucket: string, maxUploads = 1000, keyMarker = '', uploadIdMarker: string | null = null): UploadRecord[] {
+    return this.multipart.listUploads(bucket, maxUploads, keyMarker, uploadIdMarker)
   }
 
   uploadCount(bucket: string): number {

@@ -19,8 +19,8 @@ export function maybeEncode(value: string, encodingType: string): string {
 export function integerParam(query: Map<string, string>, name: string, fallback: number, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}): number {
   const raw = query.get(name)
   if (raw === undefined || raw === '') return fallback
-  const parsed = Number.parseInt(raw, 10)
-  if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+  const parsed = /^\d+$/.test(raw) ? Number(raw) : Number.NaN
+  if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) {
     throw new S3Error('InvalidArgument', `Invalid value for ${name}`)
   }
   return parsed

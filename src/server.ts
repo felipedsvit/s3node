@@ -395,8 +395,11 @@ export class S3NodeServer {
     if (!payloadHash || !STREAMING_PAYLOADS.has(payloadHash)) return
 
     const declaredLength = ctx.headers['x-amz-decoded-content-length'] as string | undefined
-    const expectedLength = declaredLength === undefined ? null : Number.parseInt(declaredLength, 10)
-    if (declaredLength !== undefined && !Number.isInteger(expectedLength)) {
+    const expectedLength = declaredLength === undefined
+      ? null
+      : /^\d+$/.test(declaredLength) ? Number(declaredLength) : Number.NaN
+    if (declaredLength !== undefined &&
+        (expectedLength === null || !Number.isSafeInteger(expectedLength) || expectedLength < 0)) {
       throw new S3Error('InvalidArgument', 'Invalid x-amz-decoded-content-length')
     }
 
@@ -408,6 +411,7 @@ export class S3NodeServer {
       scope: ctx.auth?.scope ?? null,
       amzDate: ctx.auth?.amzDate ?? null,
       expectedLength,
+      requireTrailerSignature: payloadHash === STREAMING_SIGNED_TRAILER,
     })
 
     ctx.trailers = decoder.trailers
@@ -445,14 +449,16 @@ export class S3NodeServer {
   async close(): Promise<void> {
     if (this.lifecycleTimer) clearInterval(this.lifecycleTimer)
     this.notifications.close()
-    const forced = setTimeout(() => this.http.closeAllConnections(), this.closeGracePeriodMs)
-    forced.unref?.()
-    try {
-      await new Promise<void>((resolve, reject) => {
-        this.http.close((err) => err ? reject(err) : resolve())
-      })
-    } finally {
-      clearTimeout(forced)
+    if (this.http.listening) {
+      const forced = setTimeout(() => this.http.closeAllConnections(), this.closeGracePeriodMs)
+      forced.unref?.()
+      try {
+        await new Promise<void>((resolve, reject) => {
+          this.http.close((err) => err ? reject(err) : resolve())
+        })
+      } finally {
+        clearTimeout(forced)
+      }
     }
     await this.notifications.drain()
     this.store.close()
