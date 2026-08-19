@@ -4,6 +4,19 @@ All notable changes to s3node are documented here. The project follows semantic 
 
 ## Unreleased
 
+## 0.1.11 - 2026-08-19
+
+### Security and correctness
+
+- Harden SigV4 payload, scope, date, expiry, trailer, and strict numeric validation across authenticated requests.
+- Fix policy principal matching, pagination and range edge cases, and multipart completion behavior.
+- Close blob retirement and garbage-collection races while keeping file-descriptor reads safe during cleanup.
+
+### Operations and compatibility
+
+- Add console CSRF protection, safer backup symlink handling, startup cleanup, and more reliable notification and storage observability.
+- Expand interoperability, soak, concurrency, and fault-injection coverage for the release path.
+
 ## 0.1.10 - 2026-08-16
 
 ### Backup and recovery
@@ -55,5 +68,6 @@ All notable changes to s3node are documented here. The project follows semantic 
 - Refresh the README, security policy, architecture, CLI, configuration, storage, testing, and operational documentation.
 
 [0.1.10]: https://github.com/felipedsvit/s3node/releases/tag/v0.1.10
+[0.1.11]: https://github.com/felipedsvit/s3node/releases/tag/v0.1.11
 [0.1.9]: https://github.com/felipedsvit/s3node/releases/tag/v0.1.9
 [previous releases]: https://github.com/felipedsvit/s3node/releases

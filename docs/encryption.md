@@ -66,7 +66,7 @@ SSE-S3 responses include:
 
 ## Authenticated-content roadmap
 
-Version 0.1.10 does not change the on-disk cipher format. Existing encrypted
+Version 0.1.11 does not change the on-disk cipher format. Existing encrypted
 objects remain range-readable AES-256-CTR objects and therefore require a
 trusted storage backend or independent client-side checksum validation.
 

@@ -7,7 +7,7 @@ import type { ConsoleServer as ConsoleServerInstance } from '../src/console/serv
 import type { S3NodeServer } from '../src/server.js'
 import { redactUrlForLog } from '../src/http.js'
 
-const VERSION = '0.1.10'
+const VERSION = '0.1.11'
 
 const USAGE = `
 s3node — S3-compatible object storage server

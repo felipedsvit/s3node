@@ -85,14 +85,14 @@ await s3node.close()
 
 `--access-key` and `--secret-key` must be given together.
 
-## Upgrading to v0.1.10
+## Upgrading to v0.1.11
 
 - Node.js 22.13.0 or newer is required.
 - The metadata schema remains at v6. Use `s3node-backup` to capture `metadata.sqlite`, `master.key`, active multipart state, and referenced blobs together before upgrading.
 - The new operational metrics are exposed from the admin console's `/metrics` endpoint. In CLI cluster mode, HTTP counters remain local to worker 1.
 - No authenticated-content migration is performed: existing SSE-C/SSE-S3 object data remains AES-256-CTR and retains the integrity boundary documented in [Security](SECURITY.md).
 
-See the [v0.1.10 changelog](CHANGELOG.md#0110---2026-08-16) for the complete release summary.
+See the [v0.1.11 changelog](CHANGELOG.md#0111---2026-08-19) for the complete release summary.
 
 ## Examples
 

@@ -56,7 +56,7 @@ curl -u AKIDTEST:test-secret http://127.0.0.1:9001/api/info
 ```
 
 ```json
-{"region":"us-east-1","version":"0.1.10","buckets":3,"objects":42,"bytes":1048576}
+{"region":"us-east-1","version":"0.1.11","buckets":3,"objects":42,"bytes":1048576}
 ```
 
 ```sh

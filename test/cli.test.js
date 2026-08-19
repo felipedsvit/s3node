@@ -17,7 +17,7 @@ describe('CLI validation', () => {
   it('reports the package version', () => {
     const result = cli('--version')
     assert.equal(result.status, 0)
-    assert.equal(result.stdout, '0.1.10\n')
+    assert.equal(result.stdout, '0.1.11\n')
     assert.equal(result.stderr, '')
   })
 

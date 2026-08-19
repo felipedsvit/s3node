@@ -17,7 +17,7 @@
 
 Opening an older data directory runs all required schema migrations inside one
 transaction. Before upgrading, back up `metadata.sqlite` and `master.key`
-together. Downgrading a data directory after it has been opened by v0.1.10 is not
+together. Downgrading a data directory after it has been opened by v0.1.11 is not
 supported, and databases created by a newer schema are rejected at startup.
 
 ### `buckets` table
