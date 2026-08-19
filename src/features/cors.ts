@@ -32,13 +32,17 @@ export function parseCorsXml(body: string | Buffer): CorsConfig {
       throw new S3Error('MalformedXML', 'Each CORSRule requires AllowedOrigin and AllowedMethod')
     }
     const maxAge = childText(rule, 'MaxAgeSeconds')
+    const maxAgeSeconds = maxAge === undefined ? undefined : (/^\d+$/.test(maxAge) ? Number(maxAge) : Number.NaN)
+    if (maxAgeSeconds !== undefined && !Number.isSafeInteger(maxAgeSeconds)) {
+      throw new S3Error('MalformedXML', 'MaxAgeSeconds must be a non-negative integer')
+    }
     return {
       id: childText(rule, 'ID'),
       allowedOrigins,
       allowedMethods,
       allowedHeaders: ruleValues(rule, 'AllowedHeader').map((header) => header.toLowerCase()),
       exposeHeaders: ruleValues(rule, 'ExposeHeader'),
-      maxAgeSeconds: maxAge === undefined ? undefined : Number.parseInt(maxAge, 10),
+      maxAgeSeconds,
     }
   })
   if (rules.length === 0) throw new S3Error('MalformedXML', 'At least one CORSRule is required')

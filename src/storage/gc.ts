@@ -63,6 +63,7 @@ export class GarbageCollector {
     for (const blobId of blobIds) {
       if (referenced.has(blobId)) continue
       orphaned++
+      if (await this.store.blobs.isWithinRetirementGrace(blobId)) continue
       batch.push(blobId)
       dirsTouched.add(blobId.slice(0, 2))
       if (batch.length >= GC_BATCH) {

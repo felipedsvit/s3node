@@ -28,8 +28,8 @@ export interface LifecycleConfig {
 function optionalInt(node: ReturnType<typeof parseXml>, name: string): number | undefined {
   const value = childText(node, name)
   if (value === undefined) return undefined
-  const parsed = Number.parseInt(value, 10)
-  if (!Number.isInteger(parsed) || parsed < 0) {
+  const parsed = /^\d+$/.test(value) ? Number(value) : Number.NaN
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
     throw new S3Error('MalformedXML', `Invalid ${name}`)
   }
   return parsed

@@ -106,6 +106,9 @@ export class MultipartService {
       if (input.checksumAlgorithm) {
         const computed = hasher.digest(input.checksumAlgorithm, 'base64')
         const declared = input.expectedChecksum ?? input.trailerProvider?.(`x-amz-checksum-${input.checksumAlgorithm}`) ?? null
+        if (input.trailerProvider && !declared) {
+          throw new S3Error('InvalidRequest', `Missing x-amz-checksum-${input.checksumAlgorithm} trailer`)
+        }
         if (declared && declared !== computed) throw checksumMismatch(input.checksumAlgorithm, declared, computed)
       }
 
@@ -121,7 +124,7 @@ export class MultipartService {
       })
       metadataCommitted = true
       faultPoint('multipart-part:after-metadata')
-      if (previous.value) await this.ctx.blobs.remove(previous.value.blobId)
+      if (previous.value) await this.ctx.blobs.retireMany([previous.value.blobId])
       return { etag, size, encryption: uploadEncryption }
     } catch (err) {
       if (!metadataCommitted) {
@@ -185,7 +188,7 @@ export class MultipartService {
         this.ctx.metadata.releasePendingBlob(blobId)
       })
       metadataCommitted = true
-      if (previous.value) await this.ctx.blobs.remove(previous.value.blobId)
+      if (previous.value) await this.ctx.blobs.retireMany([previous.value.blobId])
       return {
         etag,
         size,
@@ -207,9 +210,9 @@ export class MultipartService {
     return this.ctx.metadata.listParts(uploadId, options)
   }
 
-  listMultipartUploads(bucket: string, maxUploads: number): UploadRecord[] {
+  listMultipartUploads(bucket: string, maxUploads: number, keyMarker = '', uploadIdMarker: string | null = null): UploadRecord[] {
     this.buckets.requireBucket(bucket)
-    return this.ctx.metadata.listUploads(bucket, maxUploads)
+    return this.ctx.metadata.listUploads(bucket, maxUploads, keyMarker, uploadIdMarker)
   }
 
   /**

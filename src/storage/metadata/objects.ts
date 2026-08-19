@@ -228,6 +228,9 @@ export class ObjectMetadata {
     startAfter?: string
     cursor?: Buffer | null
   } = {}): ListObjectsResult {
+    if (maxKeys === 0) {
+      return { contents: [], commonPrefixes: [], truncated: false, nextCursor: null }
+    }
     const prefixBuf = toKeyBuffer(prefix)
     const delimiterBuf = delimiter ? toKeyBuffer(delimiter) : null
     const upperBound = prefixUpperBound(prefixBuf)
@@ -309,6 +312,12 @@ export class ObjectMetadata {
     keyMarker?: string
     versionIdMarker?: string
   } = {}): ListVersionsResult {
+    if (maxKeys === 0) {
+      return {
+        versions: [], commonPrefixes: [], truncated: false,
+        nextKeyMarker: null, nextVersionIdMarker: null,
+      }
+    }
     const prefixBuf = toKeyBuffer(prefix)
     const delimiterBuf = delimiter ? toKeyBuffer(delimiter) : null
     const upperBound = prefixUpperBound(prefixBuf)

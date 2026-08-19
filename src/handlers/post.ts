@@ -27,6 +27,7 @@ export async function postObject(ctx: RequestContext, res: ServerResponse, { sto
       fields,
       bucket: ctx.bucket,
       lookupCredential: server.credentials.lookup,
+      region: server.region,
     })
   } catch (err) {
     file.stream.destroy()
@@ -103,12 +104,12 @@ export async function postObject(ctx: RequestContext, res: ServerResponse, { sto
     return
   }
 
-  const status = Number.parseInt(fields.get('success_action_status') ?? '204', 10)
-  if (status === 201) {
+  const status = fields.get('success_action_status') ?? '204'
+  if (status === '201') {
     sendXml(ctx, res, 201, document('PostResponse',
       text('Location', location) + text('Bucket', ctx.bucket) +
       text('Key', key) + text('ETag', result.etag)), extraHeaders)
     return
   }
-  sendEmpty(ctx, res, status === 200 ? 200 : 204, extraHeaders)
+  sendEmpty(ctx, res, status === '200' ? 200 : 204, extraHeaders)
 }

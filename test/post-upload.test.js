@@ -40,11 +40,12 @@ function buildForm({
   expiresInMs = 60_000,
   now = new Date(),
   credential = CREDENTIAL,
+  region = 'us-east-1',
   tamperPolicy = false,
 } = {}) {
   const amzDate = amzTimestamp(now)
   const dateStamp = amzDate.slice(0, 8)
-  const scope = `${dateStamp}/us-east-1/s3/aws4_request`
+  const scope = `${dateStamp}/${region}/s3/aws4_request`
 
   const fields = {
     key,
@@ -69,7 +70,7 @@ function buildForm({
 
   const encoded = Buffer.from(JSON.stringify(policy), 'utf8').toString('base64')
   const signature = calculateSignature(
-    deriveSigningKey(credential.secretAccessKey, dateStamp, 'us-east-1', 's3', credential.accessKeyId),
+    deriveSigningKey(credential.secretAccessKey, dateStamp, region, 's3', credential.accessKeyId),
     encoded,
   )
 
@@ -250,6 +251,12 @@ describe('POST object upload', () => {
     }))
     assert.equal(response.status, 403)
     assert.equal(tag(response.text, 'Code'), 'InvalidAccessKeyId')
+  })
+
+  it('rejects a POST policy scoped to another region', async () => {
+    const response = await post(buildForm({ region: 'eu-west-1' }))
+    assert.equal(response.status, 400)
+    assert.equal(tag(response.text, 'Code'), 'AuthorizationHeaderMalformed')
   })
 
   it('rejects a body outside content-length-range', async () => {

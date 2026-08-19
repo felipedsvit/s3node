@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
-import { createReadStream, createWriteStream } from 'node:fs'
-import { mkdir, open, rename, rm, stat } from 'node:fs/promises'
+import { closeSync, createReadStream, createWriteStream, openSync } from 'node:fs'
+import { mkdir, open, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
@@ -10,6 +10,7 @@ import { faultPoint } from '../faults.js'
 import { sliceParts, type BlobPart } from './parts.js'
 
 export const READ_HIGH_WATER_MARK = 1024 * 1024
+export const BLOB_RETIRE_GRACE_MS = 30_000
 
 async function fsyncDirectory(directory: string): Promise<void> {
   let handle: Awaited<ReturnType<typeof open>> | undefined
@@ -46,16 +47,20 @@ export class BlobStore {
   root: string
   dataDir: string
   tmpDir: string
+  retiredDir: string
+  private readonly retirementTimers = new Map<string, NodeJS.Timeout>()
 
   constructor(root: string) {
     this.root = root
     this.dataDir = join(root, 'data')
     this.tmpDir = join(root, 'tmp')
+    this.retiredDir = join(root, 'retired')
   }
 
   async init(): Promise<void> {
     await mkdir(this.dataDir, { recursive: true })
     await mkdir(this.tmpDir, { recursive: true })
+    await mkdir(this.retiredDir, { recursive: true })
   }
 
   path(blobId: string): string {
@@ -119,7 +124,11 @@ export class BlobStore {
 
   async remove(blobId: string | null | undefined): Promise<void> {
     if (!blobId) return
-    await rm(this.path(blobId), { force: true }).catch(() => {})
+    const timer = this.retirementTimers.get(blobId)
+    if (timer) clearTimeout(timer)
+    this.retirementTimers.delete(blobId)
+    await rm(this.path(blobId), { force: true })
+    await rm(this.retirementPath(blobId), { force: true })
   }
 
   async removeMany(blobIds: (string | null | undefined)[], { concurrency = 32 } = {}): Promise<void> {
@@ -129,23 +138,78 @@ export class BlobStore {
     }
   }
 
+  /**
+   * Defers physical removal long enough for a request that already resolved
+   * metadata to open its file descriptors. The marker makes the grace period
+   * visible to a garbage collector running in another cluster worker.
+   */
+  async retireMany(blobIds: (string | null | undefined)[]): Promise<void> {
+    const unique = [...new Set(blobIds.filter((id): id is string => id != null))]
+    await Promise.all(unique.map(async (blobId) => {
+      await writeFile(this.retirementPath(blobId), String(Date.now()), { mode: 0o600 })
+      const previous = this.retirementTimers.get(blobId)
+      if (previous) clearTimeout(previous)
+      const timer = setTimeout(() => {
+        this.retirementTimers.delete(blobId)
+        void this.remove(blobId).catch((err: Error) => {
+          console.error(`failed to remove retired blob ${blobId}: ${err.message}`)
+        })
+      }, BLOB_RETIRE_GRACE_MS)
+      timer.unref?.()
+      this.retirementTimers.set(blobId, timer)
+    }))
+  }
+
+  async isWithinRetirementGrace(blobId: string, now = Date.now()): Promise<boolean> {
+    try {
+      const marker = await stat(this.retirementPath(blobId))
+      return now - marker.mtimeMs < BLOB_RETIRE_GRACE_MS
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false
+      throw err
+    }
+  }
+
+  private retirementPath(blobId: string): string {
+    return join(this.retiredDir, blobId)
+  }
+
   async size(blobId: string): Promise<number> {
     return (await stat(this.path(blobId))).size
   }
 
   createReadStream(blobId: string, { start, end }: { start?: number; end?: number } = {}): ReturnType<typeof createReadStream> {
-    return createReadStream(this.path(blobId), {
-      start,
-      end,
-      highWaterMark: READ_HIGH_WATER_MARK,
-    })
+    const path = this.path(blobId)
+    const fd = openSync(path, 'r')
+    try {
+      return createReadStream(path, {
+        fd,
+        autoClose: true,
+        start,
+        end,
+        highWaterMark: READ_HIGH_WATER_MARK,
+      })
+    } catch (err) {
+      closeSync(fd)
+      throw err
+    }
   }
 
   createRangeStream(parts: BlobPart[], start: number, end: number): Readable {
-    const store = this
-    async function* generate(): AsyncGenerator<Buffer> {
+    const streams: ReturnType<typeof createReadStream>[] = []
+    try {
       for (const slice of sliceParts(parts, start, end)) {
-        yield* store.createReadStream(slice.blobId, { start: slice.from, end: slice.to })
+        streams.push(this.createReadStream(slice.blobId, { start: slice.from, end: slice.to }))
+      }
+    } catch (err) {
+      for (const stream of streams) stream.destroy()
+      throw err
+    }
+    async function* generate(): AsyncGenerator<Buffer> {
+      try {
+        for (const stream of streams) yield* stream
+      } finally {
+        for (const stream of streams) stream.destroy()
       }
     }
     return Readable.from(generate(), { highWaterMark: READ_HIGH_WATER_MARK })

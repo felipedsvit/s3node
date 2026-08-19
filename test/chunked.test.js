@@ -122,6 +122,22 @@ describe('ChunkedDecoder', () => {
     assert.ok(decoder.trailers['x-amz-checksum-crc32'])
   })
 
+  it('requires a trailer signature for the signed-trailer payload mode', async () => {
+    const payload = Buffer.from('hello world')
+    const framed = encodeChunked(payload, {
+      ...signedOptions,
+      trailers: { 'x-amz-checksum-crc32': new Crc32().update(payload).digest('base64') },
+    })
+    const unsignedTrailer = Buffer.from(
+      framed.toString('latin1').replace(/x-amz-trailer-signature:[0-9a-f]{64}\r\n/, ''),
+      'latin1',
+    )
+    await assert.rejects(
+      decode(unsignedTrailer, { ...signedOptions, requireTrailerSignature: true }),
+      (err) => err.code === 'SignatureDoesNotMatch',
+    )
+  })
+
   it('rejects a decoded length that disagrees with the declared one', async () => {
     const framed = encodeChunked(Buffer.from('hello'), { signed: false })
     await assert.rejects(
@@ -141,6 +157,13 @@ describe('ChunkedDecoder', () => {
   it('rejects a malformed chunk size', async () => {
     await assert.rejects(
       decode(Buffer.from('zz\r\ndata\r\n0\r\n\r\n'), {}),
+      (err) => err.code === 'InvalidRequest',
+    )
+  })
+
+  it('rejects a hexadecimal chunk size with trailing junk', async () => {
+    await assert.rejects(
+      decode(Buffer.from('5junk\r\nhello\r\n0\r\n\r\n'), {}),
       (err) => err.code === 'InvalidRequest',
     )
   })

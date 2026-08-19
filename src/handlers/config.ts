@@ -1,6 +1,6 @@
 import type { ServerResponse } from 'node:http'
 import { S3Error } from '../errors.js'
-import { collectBody, sendEmpty, sendXml, type RequestContext } from '../http.js'
+import { collectRequestBody, sendEmpty, sendXml, type RequestContext } from '../http.js'
 import { corsXml, parseCorsXml } from '../features/cors.js'
 import type { CorsConfig } from '../features/cors.js'
 import { lifecycleXml, parseLifecycleXml } from '../features/lifecycle.js'
@@ -22,7 +22,7 @@ export function getBucketVersioning(ctx: RequestContext, res: ServerResponse, { 
 
 export async function putBucketVersioning(ctx: RequestContext, res: ServerResponse, { store }: { store: ObjectStore }): Promise<void> {
   store.requireBucket(ctx.bucket)
-  const root = parseXml(await collectBody(ctx.bodyStreams))
+  const root = parseXml(await collectRequestBody(ctx))
   if (root.name !== 'VersioningConfiguration') {
     throw new S3Error('MalformedXML', 'Expected a VersioningConfiguration element')
   }
@@ -49,7 +49,7 @@ export function getBucketPolicy(ctx: RequestContext, res: ServerResponse, { stor
 
 export async function putBucketPolicy(ctx: RequestContext, res: ServerResponse, { store }: { store: ObjectStore }): Promise<void> {
   store.requireBucket(ctx.bucket)
-  const policy = parsePolicy(await collectBody(ctx.bodyStreams))
+  const policy = parsePolicy(await collectRequestBody(ctx))
   store.putBucketConfig(ctx.bucket, 'policy', policy)
   sendEmpty(ctx, res, 204)
 }
@@ -67,7 +67,7 @@ export function getBucketCors(ctx: RequestContext, res: ServerResponse, { store 
 
 export async function putBucketCors(ctx: RequestContext, res: ServerResponse, { store }: { store: ObjectStore }): Promise<void> {
   store.requireBucket(ctx.bucket)
-  store.putBucketConfig(ctx.bucket, 'cors', parseCorsXml(await collectBody(ctx.bodyStreams)))
+  store.putBucketConfig(ctx.bucket, 'cors', parseCorsXml(await collectRequestBody(ctx)))
   sendEmpty(ctx, res, 200)
 }
 
@@ -84,7 +84,7 @@ export function getBucketLifecycle(ctx: RequestContext, res: ServerResponse, { s
 
 export async function putBucketLifecycle(ctx: RequestContext, res: ServerResponse, { store }: { store: ObjectStore }): Promise<void> {
   store.requireBucket(ctx.bucket)
-  store.putBucketConfig(ctx.bucket, 'lifecycle', parseLifecycleXml(await collectBody(ctx.bodyStreams)))
+  store.putBucketConfig(ctx.bucket, 'lifecycle', parseLifecycleXml(await collectRequestBody(ctx)))
   sendEmpty(ctx, res, 200)
 }
 
@@ -101,7 +101,7 @@ export function getBucketTagging(ctx: RequestContext, res: ServerResponse, { sto
 
 export async function putBucketTagging(ctx: RequestContext, res: ServerResponse, { store }: { store: ObjectStore }): Promise<void> {
   store.requireBucket(ctx.bucket)
-  const tags = parseTaggingXml(await collectBody(ctx.bodyStreams), { max: MAX_BUCKET_TAGS })
+  const tags = parseTaggingXml(await collectRequestBody(ctx), { max: MAX_BUCKET_TAGS })
   store.putBucketConfig(ctx.bucket, 'tagging', tags)
   sendEmpty(ctx, res, 204)
 }
@@ -118,7 +118,7 @@ export function getBucketNotification(ctx: RequestContext, res: ServerResponse, 
 
 export async function putBucketNotification(ctx: RequestContext, res: ServerResponse, { store }: { store: ObjectStore }): Promise<void> {
   store.requireBucket(ctx.bucket)
-  const config = parseNotificationXml(await collectBody(ctx.bodyStreams))
+  const config = parseNotificationXml(await collectRequestBody(ctx))
   if (config.targets.length === 0) {
     store.deleteBucketConfig(ctx.bucket, 'notification')
   } else {
@@ -140,7 +140,7 @@ export async function putBucketObjectLock(ctx: RequestContext, res: ServerRespon
   if (store.bucketVersioning(ctx.bucket) !== 'Enabled') {
     throw new S3Error('InvalidBucketState', 'Object Lock requires versioning to be enabled')
   }
-  const config = parseObjectLockConfigXml(await collectBody(ctx.bodyStreams))
+  const config = parseObjectLockConfigXml(await collectRequestBody(ctx))
   if (!config.enabled) {
     throw new S3Error('InvalidRequest', 'Object Lock cannot be disabled once configured')
   }

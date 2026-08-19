@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { Writable, type WritableOptions } from 'node:stream'
 import { pipeline as streamPipeline } from 'node:stream/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -179,6 +179,17 @@ export async function collectBody(sources: (import('node:stream').Readable | imp
   return Buffer.concat(chunks)
 }
 
+/** Collects a request body and enforces a literal SigV4 payload digest. */
+export async function collectRequestBody(ctx: RequestContext, maxBytes = MAX_XML_BODY_BYTES): Promise<Buffer> {
+  const body = await collectBody(ctx.bodyStreams, maxBytes)
+  const expected = ctx.auth?.payloadHash
+  if (expected && /^[0-9a-f]{64}$/.test(expected)) {
+    const actual = createHash('sha256').update(body).digest('hex')
+    if (actual !== expected) throw new S3Error('XAmzContentSHA256Mismatch')
+  }
+  return body
+}
+
 export function baseHeaders(ctx: RequestContext): Record<string, string> {
   return {
     'x-amz-request-id': ctx.requestId,
@@ -247,13 +258,19 @@ export function parseRange(header: string | undefined, size: number): ByteRange 
   let start: number
   let end: number
   if (rawStart === '') {
+    if (rawEnd === '') throw new S3Error('InvalidRange', undefined, { contentRange: `bytes */${size}` })
     const suffix = Number.parseInt(rawEnd!, 10)
-    if (suffix <= 0) throw new S3Error('InvalidRange', undefined, { contentRange: `bytes */${size}` })
+    if (!Number.isSafeInteger(suffix) || suffix <= 0) {
+      throw new S3Error('InvalidRange', undefined, { contentRange: `bytes */${size}` })
+    }
     start = Math.max(size - suffix, 0)
     end = size - 1
   } else {
     start = Number.parseInt(rawStart!, 10)
     end = rawEnd === '' ? size - 1 : Number.parseInt(rawEnd!, 10)
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end)) {
+      throw new S3Error('InvalidRange', undefined, { contentRange: `bytes */${size}` })
+    }
     if (end >= size) end = size - 1
   }
   if (start >= size || start > end) {

@@ -64,6 +64,8 @@ describe('parseAmzDate', () => {
 
   it('rejects anything else', () => {
     assert.equal(parseAmzDate('2013-05-24T00:00:00Z'), null)
+    assert.equal(parseAmzDate('20260230T000000Z'), null)
+    assert.equal(parseAmzDate('20260101T246000Z'), null)
     assert.equal(parseAmzDate(undefined), null)
   })
 })

@@ -97,7 +97,8 @@ function fail(err) {
 }
 
 async function api(path, options) {
-  const response = await fetch(path, options)
+  const request = options ? { ...options, headers: { ...(options.headers || {}), 'x-s3node-csrf': '1' } } : options
+  const response = await fetch(path, request)
   if (!response.ok) throw new Error(await response.text() || response.statusText)
   const type = response.headers.get('content-type') || ''
   return type.includes('json') ? response.json() : response

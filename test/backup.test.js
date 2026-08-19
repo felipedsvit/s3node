@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
@@ -83,5 +83,34 @@ describe('backup and restore drill', () => {
     const { appendFile } = await import('node:fs/promises')
     await appendFile(join(backup, 'master.key'), 'tamper')
     await assert.rejects(verifyBackup(backup), /size mismatch|checksum mismatch/)
+  })
+
+  it('rejects a manifest entry replaced by a symlink outside the snapshot', async () => {
+    const source = await tempPath('source')
+    const backup = await tempPath('snapshot')
+    const external = await tempPath('external-key')
+    const store = await ObjectStore.open({ dataDir: source })
+    store.createBucket('backup-bucket')
+    await createBackup(source, backup)
+    store.close()
+
+    await writeFile(external, await readFile(join(backup, 'master.key')))
+    await rm(join(backup, 'master.key'))
+    await symlink(external, join(backup, 'master.key'))
+    await assert.rejects(verifyBackup(backup), /must not be a symbolic link/)
+  })
+
+  it('does not follow a source master key symlink while creating a backup', async () => {
+    const source = await tempPath('source')
+    const backup = await tempPath('snapshot')
+    const external = await tempPath('external-key')
+    const store = await ObjectStore.open({ dataDir: source })
+    store.createBucket('backup-bucket')
+    store.close()
+
+    await writeFile(external, await readFile(join(source, 'master.key')))
+    await rm(join(source, 'master.key'))
+    await symlink(external, join(source, 'master.key'))
+    await assert.rejects(createBackup(source, backup), /must not be a symbolic link/)
   })
 })

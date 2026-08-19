@@ -13,7 +13,7 @@ import {
 import { parseTaggingHeader, parseTaggingXml, taggingXml } from '../features/tagging.js'
 import {
   baseHeaders,
-  collectBody,
+  collectRequestBody,
   evaluatePreconditions,
   httpDate,
   isoDate,
@@ -220,7 +220,7 @@ export function getObjectTagging(ctx: RequestContext, res: ServerResponse, { sto
 }
 
 export async function putObjectTagging(ctx: RequestContext, res: ServerResponse, { store }: { store: ObjectStore }): Promise<void> {
-  const tags = parseTaggingXml(await collectBody(ctx.bodyStreams))
+  const tags = parseTaggingXml(await collectRequestBody(ctx))
   const versionId = store.setObjectTags(ctx.bucket, ctx.key, requestedVersionId(ctx), tags)
   sendEmpty(ctx, res, 200, versionId !== 'null' ? { 'x-amz-version-id': versionId } : {})
 }
@@ -240,7 +240,7 @@ export function getObjectRetention(ctx: RequestContext, res: ServerResponse, { s
 }
 
 export async function putObjectRetention(ctx: RequestContext, res: ServerResponse, { store, server }: { store: ObjectStore; server: S3NodeServer }): Promise<void> {
-  const retention = parseRetentionXml(await collectBody(ctx.bodyStreams))
+  const retention = parseRetentionXml(await collectRequestBody(ctx))
   if (bypassGovernance(ctx)) {
     server.authorize(ctx, 's3:BypassGovernanceRetention', objectArn(ctx.bucket, ctx.key))
   }
@@ -255,7 +255,7 @@ export function getObjectLegalHold(ctx: RequestContext, res: ServerResponse, { s
 }
 
 export async function putObjectLegalHold(ctx: RequestContext, res: ServerResponse, { store }: { store: ObjectStore }): Promise<void> {
-  const held = parseLegalHoldXml(await collectBody(ctx.bodyStreams))
+  const held = parseLegalHoldXml(await collectRequestBody(ctx))
   const versionId = store.setLegalHold(ctx.bucket, ctx.key, requestedVersionId(ctx), held)
   sendEmpty(ctx, res, 200, versionId !== 'null' ? { 'x-amz-version-id': versionId } : {})
 }

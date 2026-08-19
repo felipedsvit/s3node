@@ -83,6 +83,28 @@ describe('authentication', () => {
     assert.equal(tag(response.text, 'Code'), 'SignatureDoesNotMatch')
   })
 
+  it('rejects a buffered body that differs from its signed payload hash', async () => {
+    const signed = '<Tagging><TagSet><Tag><Key>a</Key><Value>one</Value></Tag></TagSet></Tagging>'
+    const tampered = signed.replace('one', 'two')
+    const response = await client.request({
+      method: 'PUT', bucket: BUCKET, query: { tagging: '' }, body: tampered, bodyToSign: signed,
+    })
+    assert.equal(response.status, 400)
+    assert.equal(tag(response.text, 'Code'), 'XAmzContentSHA256Mismatch')
+    assert.equal((await client.request({ method: 'GET', bucket: BUCKET, query: { tagging: '' } })).status, 404)
+  })
+
+  it('rejects a credential scoped to a different region', async () => {
+    const wrongRegion = await client.request({ method: 'GET' })
+    assert.equal(wrongRegion.status, 200)
+
+    const regional = new TestClient({ endpoint: server.endpoint, ...CREDENTIAL, region: 'eu-west-1' })
+    const response = await regional.request({ method: 'GET' })
+    assert.equal(response.status, 400)
+    assert.equal(tag(response.text, 'Code'), 'AuthorizationHeaderMalformed')
+    assert.equal(response.headers['x-amz-bucket-region'], 'us-east-1')
+  })
+
   it('rejects an unknown access key', async () => {
     const stranger = new TestClient({
       endpoint: server.endpoint, accessKeyId: 'AKIDNOPE', secretAccessKey: 'nope',
@@ -120,6 +142,15 @@ describe('authentication', () => {
     })
     const expired = await client.send({ method: 'GET', path: stale.path, headers: {} })
     assert.equal(expired.status, 403)
+  })
+
+  it('rejects a presigned expiry containing trailing junk', async () => {
+    const signed = client.presign({ method: 'GET', bucket: BUCKET, key: 'signed.txt' })
+    const response = await client.send({
+      method: 'GET', path: signed.path.replace('X-Amz-Expires=900', 'X-Amz-Expires=900seconds'), headers: {},
+    })
+    assert.equal(response.status, 400)
+    assert.equal(tag(response.text, 'Code'), 'AuthorizationHeaderMalformed')
   })
 
   it('refuses 100-continue before the body when the signature is wrong', async () => {
@@ -324,6 +355,15 @@ describe('objects', () => {
     assert.equal(response.headers['content-range'], 'bytes */10')
   })
 
+  it('rejects an empty suffix range without resetting the connection', async () => {
+    await client.request({ method: 'PUT', bucket: BUCKET, key: 'range.txt', body: '0123456789' })
+    const response = await client.request({
+      method: 'GET', bucket: BUCKET, key: 'range.txt', headers: { range: 'bytes=-' },
+    })
+    assert.equal(response.status, 416)
+    assert.equal(response.headers['content-range'], 'bytes */10')
+  })
+
   it('honours conditional headers', async () => {
     const put = await client.request({ method: 'PUT', bucket: BUCKET, key: 'cond.txt', body: 'data' })
     const etag = put.headers.etag
@@ -439,6 +479,25 @@ describe('listing over HTTP', () => {
       assert.ok(token)
     }
     assert.deepEqual(seen, keys)
+  })
+
+  it('returns an empty non-truncated page for max-keys=0', async () => {
+    const response = await client.request({
+      method: 'GET', bucket: BUCKET, query: { 'list-type': '2', 'max-keys': '0' },
+    })
+    assert.equal(response.status, 200)
+    assert.deepEqual(allTags(response.text, 'Key'), [])
+    assert.equal(tag(response.text, 'KeyCount'), '0')
+    assert.equal(tag(response.text, 'IsTruncated'), 'false')
+    assert.equal(tag(response.text, 'NextContinuationToken'), undefined)
+  })
+
+  it('rejects integer query parameters containing trailing junk', async () => {
+    const response = await client.request({
+      method: 'GET', bucket: BUCKET, query: { 'list-type': '2', 'max-keys': '2junk' },
+    })
+    assert.equal(response.status, 400)
+    assert.equal(tag(response.text, 'Code'), 'InvalidArgument')
   })
 
   it('supports start-after', async () => {
@@ -558,6 +617,77 @@ describe('multipart over HTTP', () => {
     const after = await client.request({ method: 'GET', bucket: BUCKET, key, query: { uploadId } })
     assert.equal(after.status, 404)
     assert.equal(tag(after.text, 'Code'), 'NoSuchUpload')
+  })
+
+  it('paginates uploads with both continuation markers', async () => {
+    for (const key of ['a.bin', 'b.bin', 'c.bin']) {
+      const created = await client.request({ method: 'POST', bucket: BUCKET, key, query: { uploads: '' } })
+      assert.equal(created.status, 200)
+    }
+
+    const first = await client.request({
+      method: 'GET', bucket: BUCKET, query: { uploads: '', 'max-uploads': '2' },
+    })
+    assert.deepEqual(allTags(first.text, 'Key'), ['a.bin', 'b.bin'])
+    assert.equal(tag(first.text, 'IsTruncated'), 'true')
+
+    const second = await client.request({
+      method: 'GET', bucket: BUCKET,
+      query: {
+        uploads: '', 'max-uploads': '2',
+        'key-marker': tag(first.text, 'NextKeyMarker'),
+        'upload-id-marker': tag(first.text, 'NextUploadIdMarker'),
+      },
+    })
+    assert.deepEqual(allTags(second.text, 'Key'), ['c.bin'])
+    assert.equal(tag(second.text, 'IsTruncated'), 'false')
+  })
+
+  it('skips every upload at key-marker when upload-id-marker is absent', async () => {
+    for (const key of ['same.bin', 'same.bin', 'z.bin']) {
+      await client.request({ method: 'POST', bucket: BUCKET, key, query: { uploads: '' } })
+    }
+    const response = await client.request({
+      method: 'GET', bucket: BUCKET, query: { uploads: '', 'key-marker': 'same.bin' },
+    })
+    assert.deepEqual(allTags(response.text, 'Key'), ['z.bin'])
+  })
+
+  it('handles zero and exact-size ListParts pages', async () => {
+    const key = 'parts-page.bin'
+    const created = await client.request({ method: 'POST', bucket: BUCKET, key, query: { uploads: '' } })
+    const uploadId = tag(created.text, 'UploadId')
+    await client.request({
+      method: 'PUT', bucket: BUCKET, key, query: { partNumber: '1', uploadId }, body: 'part',
+    })
+
+    const empty = await client.request({
+      method: 'GET', bucket: BUCKET, key, query: { uploadId, 'max-parts': '0' },
+    })
+    assert.equal(empty.status, 200)
+    assert.deepEqual(allTags(empty.text, 'PartNumber'), [])
+    assert.equal(tag(empty.text, 'IsTruncated'), 'false')
+
+    const exact = await client.request({
+      method: 'GET', bucket: BUCKET, key, query: { uploadId, 'max-parts': '1' },
+    })
+    assert.deepEqual(allTags(exact.text, 'PartNumber'), ['1'])
+    assert.equal(tag(exact.text, 'IsTruncated'), 'false')
+  })
+
+  it('still validates the upload and bucket when a page size is zero', async () => {
+    const missingUpload = await client.request({
+      method: 'GET', bucket: BUCKET, key: 'missing.bin',
+      query: { uploadId: 'missing', 'max-parts': '0' },
+    })
+    assert.equal(missingUpload.status, 404)
+    assert.equal(tag(missingUpload.text, 'Code'), 'NoSuchUpload')
+
+    const missingBucket = await client.request({
+      method: 'GET', bucket: 'missing-bucket', query: { uploads: '', 'max-uploads': '0' },
+    })
+    assert.equal(missingBucket.status, 404)
+    assert.equal(tag(missingBucket.text, 'Code'), 'NoSuchBucket')
   })
 
   it('rejects completing with a mismatched part ETag', async () => {

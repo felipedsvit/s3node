@@ -154,7 +154,12 @@ export function parseAmzDate(amzDate: string | undefined | null): Date | null {
   const match = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/.exec(amzDate ?? '')
   if (!match) return null
   const [, y, mo, d, h, mi, s] = match
-  return new Date(Date.UTC(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), Number(s)))
+  const parsed = new Date(Date.UTC(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), Number(s)))
+  return parsed.getUTCFullYear() === Number(y) && parsed.getUTCMonth() === Number(mo) - 1 &&
+    parsed.getUTCDate() === Number(d) && parsed.getUTCHours() === Number(h) &&
+    parsed.getUTCMinutes() === Number(mi) && parsed.getUTCSeconds() === Number(s)
+    ? parsed
+    : null
 }
 
 interface ParsedCredential {
@@ -257,8 +262,9 @@ export function verifyRequest(ctx: RequestContext, { lookupCredential, now = Dat
     amzDate = ctx.query.get('X-Amz-Date') ?? ''
     const requestDate = parseAmzDate(amzDate)
     if (!requestDate) throw new S3Error('AuthorizationHeaderMalformed', 'Invalid X-Amz-Date')
-    const expires = Number.parseInt(ctx.query.get('X-Amz-Expires') ?? '', 10)
-    if (!Number.isInteger(expires) || expires <= 0 || expires > MAX_PRESIGN_EXPIRY) {
+    const rawExpires = ctx.query.get('X-Amz-Expires') ?? ''
+    const expires = /^\d+$/.test(rawExpires) ? Number(rawExpires) : Number.NaN
+    if (!Number.isSafeInteger(expires) || expires <= 0 || expires > MAX_PRESIGN_EXPIRY) {
       throw new S3Error('AuthorizationHeaderMalformed', 'X-Amz-Expires must be between 1 and 604800 seconds')
     }
     if (now > requestDate.getTime() + expires * 1000) {
@@ -284,6 +290,14 @@ export function verifyRequest(ctx: RequestContext, { lookupCredential, now = Dat
   }
   if (parsed.service !== 's3') {
     throw new S3Error('AuthorizationHeaderMalformed', `Credential should be scoped to service: s3`)
+  }
+  if (parsed.region !== region) {
+    throw new S3Error('AuthorizationHeaderMalformed', `Credential should be scoped to region: ${region}`, {
+      headers: { 'x-amz-bucket-region': region },
+    })
+  }
+  if (parsed.date !== amzDate.slice(0, 8)) {
+    throw new S3Error('AuthorizationHeaderMalformed', 'Credential scope date must match x-amz-date')
   }
 
   const credential = lookupCredential(parsed.accessKeyId)

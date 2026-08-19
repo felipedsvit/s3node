@@ -65,6 +65,7 @@ export class TestClient {
     query = {},
     headers = {},
     body = null,
+    bodyToSign = body,
     payloadMode = 'signed',
     trailers = null,
     chunkSize = 65536,
@@ -75,6 +76,8 @@ export class TestClient {
     const amzDate = amzTimestamp(now)
     const rawBody = body === null ? Buffer.alloc(0)
       : Buffer.isBuffer(body) ? body : Buffer.from(body)
+    const signedBody = bodyToSign === null ? Buffer.alloc(0)
+      : Buffer.isBuffer(bodyToSign) ? bodyToSign : Buffer.from(bodyToSign)
 
     let path = '/'
     if (bucket) path = key ? `/${bucket}/${uriEncode(key, false)}` : `/${bucket}`
@@ -109,7 +112,7 @@ export class TestClient {
       })
       signedHeaders['content-length'] = String(probe.length)
     } else {
-      payloadHash = rawBody.length === 0 ? EMPTY_SHA256 : createHash('sha256').update(rawBody).digest('hex')
+      payloadHash = signedBody.length === 0 ? EMPTY_SHA256 : createHash('sha256').update(signedBody).digest('hex')
       if (rawBody.length > 0) signedHeaders['content-length'] = String(rawBody.length)
     }
     signedHeaders['x-amz-content-sha256'] = payloadHash

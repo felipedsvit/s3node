@@ -201,6 +201,17 @@ describe('versioned objects', () => {
     assert.equal(new Set(seen).size, 6, 'pagination must not repeat a version')
   })
 
+  it('returns a non-truncated empty version page for max-keys=0', async () => {
+    await client.request({ method: 'PUT', bucket: BUCKET, key: 'k', body: 'v1' })
+    const response = await client.request({
+      method: 'GET', bucket: BUCKET, query: { versions: '', 'max-keys': '0' },
+    })
+    assert.equal(response.status, 200)
+    assert.deepEqual(versionBlocks(response.text), [])
+    assert.equal(tag(response.text, 'IsTruncated'), 'false')
+    assert.equal(tag(response.text, 'NextKeyMarker'), undefined)
+  })
+
   it('versions a multipart upload', async () => {
     const create = await client.request({
       method: 'POST', bucket: BUCKET, key: 'big', query: { uploads: '' },

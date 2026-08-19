@@ -96,6 +96,17 @@ describe('object lock over HTTP', () => {
     assert.equal(tag(got.text, 'ObjectLockEnabled'), 'Enabled')
   })
 
+  it('rejects a default retention period containing trailing junk', async () => {
+    const response = await client.request({
+      method: 'PUT', bucket: BUCKET, query: { 'object-lock': '' },
+      body: '<ObjectLockConfiguration><ObjectLockEnabled>Enabled</ObjectLockEnabled>' +
+        '<Rule><DefaultRetention><Mode>GOVERNANCE</Mode><Days>1day</Days>' +
+        '</DefaultRetention></Rule></ObjectLockConfiguration>',
+    })
+    assert.equal(response.status, 400)
+    assert.equal(tag(response.text, 'Code'), 'MalformedXML')
+  })
+
   it('does not allow Object Lock to be disabled or versioning to be suspended', async () => {
     const disabled = await client.request({
       method: 'PUT', bucket: BUCKET, query: { 'object-lock': '' },

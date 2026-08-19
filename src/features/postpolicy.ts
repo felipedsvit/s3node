@@ -1,5 +1,5 @@
 import { S3Error } from '../errors.js'
-import { ALGORITHM, calculateSignature, deriveSigningKey, signaturesMatch } from '../auth/sigv4.js'
+import { ALGORITHM, calculateSignature, deriveSigningKey, parseAmzDate, signaturesMatch } from '../auth/sigv4.js'
 import type { Credential } from '../auth/credentials.js'
 
 const MAX_POLICY_BYTES = 20 * 1024
@@ -83,12 +83,13 @@ function validateConditions(policy: Record<string, unknown>, fields: Map<string,
   return { range }
 }
 
-export function verifyPostPolicy({ fields, bucket, lookupCredential, now = Date.now(), contentLength }: {
+export function verifyPostPolicy({ fields, bucket, lookupCredential, now = Date.now(), contentLength, region: expectedRegion = 'us-east-1' }: {
   fields: Map<string, string>
   bucket: string
   lookupCredential: (accessKeyId: string) => Credential | undefined
   now?: number
   contentLength?: number
+  region?: string
 }): { accessKeyId: string; policy: Record<string, unknown>; range: { min: number; max: number } | null } {
   const encodedPolicy = fields.get('policy')
   if (!encodedPolicy) throw new S3Error('AccessDenied', 'The POST request is missing a policy')
@@ -105,6 +106,13 @@ export function verifyPostPolicy({ fields, bucket, lookupCredential, now = Date.
 
   const { accessKeyId, date, region, service } = parseCredential(fields.get('x-amz-credential') ?? '')
   if (service !== 's3') throw new S3Error('AuthorizationHeaderMalformed', 'Credential must be scoped to s3')
+  if (region !== expectedRegion) {
+    throw new S3Error('AuthorizationHeaderMalformed', `Credential must be scoped to region ${expectedRegion}`)
+  }
+  const amzDate = fields.get('x-amz-date')
+  if (!parseAmzDate(amzDate) || date !== amzDate!.slice(0, 8)) {
+    throw new S3Error('AuthorizationHeaderMalformed', 'Credential scope date must match x-amz-date')
+  }
 
   const credential = lookupCredential(accessKeyId)
   if (!credential) throw new S3Error('InvalidAccessKeyId')
